@@ -1,13 +1,11 @@
-# Sequential study; one Fluent/MAPDL job at a time.
+# Sequential adiabatic CFD study; one Fluent job at a time.
 geometry_directory: ./geometry_batch
 geometry_glob: "*.x_t"
 base_config: ./config.yaml
-thermal_config: ./thermal_analysis.yaml
 runs_directory: ./runs
 resume: true
 stop_on_error: false
 run_cfd: true
-run_thermal: true
 force_fluent_gui: false
 comparison_outputs: true
 
@@ -19,12 +17,9 @@ timeouts:
   solver:
     hard_s: 7200
     inactivity_s: 1200
-  thermal_export:
+  temperature_export:
     hard_s: 1200
     inactivity_s: 600
   aero:
     hard_s: 1200
     inactivity_s: 600
-  thermal:
-    hard_s: 5400
-    inactivity_s: 5400

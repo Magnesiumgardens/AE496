@@ -40,8 +40,8 @@ class StudyResumeTests(unittest.TestCase):
 
     def runner(self, command, log_path, **_):
         names = {"run_all.py": "mesh", "run_solver_only.py": "solver",
-                 "export_thermal_only.py": "thermal_export", "export_aero_only.py": "aero",
-                 "run_thermal_analysis.py": "thermal"}
+                 "export_temperature_only.py": "temperature_export", "export_aero_only.py": "aero",
+                 "run_thermal_analysis.py": "disabled_thermal"}
         stage = names[Path(command[2]).name]
         self.calls.append(stage)
         cfg = load_config(self.config)
@@ -50,8 +50,19 @@ class StudyResumeTests(unittest.TestCase):
             if stage == "aero":
                 path.write_text(json.dumps(dict(status="complete", model_version=MODEL_VERSION,
                     body_wall_zones=[cfg["geometry"]["body_wall_name"]], **reference_state(cfg))))
-            elif stage == "thermal_export":
-                path.write_text("surface_order_index,x_m,y_m,heat_flux_into_wall_W_m2\n0,0,0,10\n1,1,0,20\n2,0,1,30\n")
+            elif stage == "temperature_export":
+                if path.suffix == ".json":
+                    from pipeline.utils import file_sha256
+                    from pipeline.temperature_export import temperature_conditions
+                    csv_path = stage_files(self.work, cfg)[stage][0]
+                    path.write_text(json.dumps(dict(status="complete", thermal_mode="adiabatic", face_count=3,
+                        temperature_export_signature=cfg.get("temperature_export", {}),
+                        conditions=temperature_conditions(cfg),
+                        zero_flux_tolerance_W_m2=1, wall_csv_sha256=file_sha256(csv_path),
+                        source_sha256={"final_case":file_sha256(self.work/"04_final.cas.h5"),
+                                       "final_data":file_sha256(self.work/"04_final.dat.h5")})))
+                else:
+                    path.write_text("surface_order_index,x_m,y_m,segment_length_m,wall_temperature_K,near_wall_fluid_temperature_K,wall_heat_flux_fluent_W_m2\n0,0,0,1,2000,1900,0\n1,1,0,1,2200,2100,0\n2,0,1,1,2000,1900,0\n")
             elif path.suffix == ".json":
                 path.write_text(json.dumps(dict(status="complete", loading_mode="fixed_heat_flux")))
             else:
@@ -105,35 +116,35 @@ class StudyResumeTests(unittest.TestCase):
         self.cfg["flight"]["mach"] = 7
         self.write_configs()
         self.run_case()
-        self.assertEqual(self.calls, ["solver", "thermal_export", "aero", "thermal"])
+        self.assertEqual(self.calls, ["solver", "temperature_export", "aero"])
         old = list((self.work / "_history").glob("*/04_final.dat.h5"))
         self.assertEqual(len(old), 1)
         self.assertEqual(old[0].read_text(), original)
 
     def test_changed_reference_width_does_not_rerun_thermal(self):
         self.run_case()
-        original = (self.work / "thermal_analysis/thermal_summary.json").read_bytes()
+        original = (self.work / "temperature/temperature_summary.json").read_bytes()
         self.calls.clear()
         self.cfg["aero"]["reference_area_per_unit_span_m"] = 0.1
         self.write_configs()
         self.run_case()
         self.assertEqual(self.calls, ["aero"])
-        self.assertEqual((self.work / "thermal_analysis/thermal_summary.json").read_bytes(), original)
+        self.assertEqual((self.work / "temperature/temperature_summary.json").read_bytes(), original)
 
-    def test_changed_thermal_settings_do_not_rerun_cfd(self):
+    def test_changed_temperature_export_settings_do_not_rerun_cfd(self):
         self.run_case()
         self.calls.clear()
-        self.thermal_cfg["transient"]["duration_s"] = 500
+        self.cfg["temperature_export"]["zero_flux_tolerance_W_m2"] = 0.5
         self.write_configs()
         self.run_case()
-        self.assertEqual(self.calls, ["thermal"])
+        self.assertEqual(self.calls, ["temperature_export"])
 
     def test_changed_geometry_bytes_invalidate_all_results(self):
         self.run_case()
         self.calls.clear()
         self.geometry.write_text("revised geometry")
         self.run_case()
-        self.assertEqual(self.calls, ["mesh", "solver", "thermal_export", "aero", "thermal"])
+        self.assertEqual(self.calls, ["mesh", "solver", "temperature_export", "aero"])
 
     def test_modified_cached_output_is_not_accepted(self):
         self.run_case(stop_after="mesh")
@@ -143,30 +154,30 @@ class StudyResumeTests(unittest.TestCase):
         self.assertEqual(self.calls, ["mesh"])
 
     def test_corrupt_legacy_boundary_reruns_export_only(self):
-        self.run_case(stop_after="thermal_export")
+        self.run_case(stop_after="temperature_export")
         old_mesh = (self.work / "02_mesh.msh.h5").read_bytes()
         old_solver = (self.work / "04_final.dat.h5").read_bytes()
         (self.work / "_batch/stage_state.json").unlink()
-        boundary = self.work / "thermal_bc/body_wall_faces.csv"
+        boundary = self.work / "temperature/wall_temperatures.csv"
         boundary.write_text("corrupt nonempty boundary file")
         self.calls.clear()
-        self.run_case(stop_after="thermal_export")
-        self.assertEqual(self.calls, ["thermal_export"])
+        self.run_case(stop_after="temperature_export")
+        self.assertEqual(self.calls, ["solver", "temperature_export"])
         self.assertEqual((self.work / "02_mesh.msh.h5").read_bytes(), old_mesh)
-        self.assertEqual((self.work / "04_final.dat.h5").read_bytes(), old_solver)
-        retained = list((self.work / "_history").glob("*/thermal_bc/body_wall_faces.csv"))
+        self.assertNotEqual((self.work / "04_final.dat.h5").read_bytes(), old_solver)
+        retained = list((self.work / "_history").glob("*/temperature/wall_temperatures.csv"))
         self.assertEqual(retained[0].read_text(), "corrupt nonempty boundary file")
 
     def test_executed_export_with_nonfinite_flux_fails(self):
         def corrupt_runner(command, log_path, **kwargs):
             self.runner(command, log_path, **kwargs)
-            if Path(command[2]).name == "export_thermal_only.py":
-                (self.work / "thermal_bc/body_wall_faces.csv").write_text(
+            if Path(command[2]).name == "export_temperature_only.py":
+                (self.work / "temperature/wall_temperatures.csv").write_text(
                     "surface_order_index,x_m,y_m,heat_flux_into_wall_W_m2\n0,0,0,nan\n1,1,0,20\n2,0,1,30\n")
-        with self.assertRaisesRegex(BatchError, "Invalid thermal_export"):
-            run_case(self.config, self.thermal, stop_after="thermal_export", _runner=corrupt_runner)
+        with self.assertRaisesRegex(BatchError, "Invalid temperature_export"):
+            run_case(self.config, self.thermal, stop_after="temperature_export", _runner=corrupt_runner)
         state = json.loads((self.work / "_batch/stage_state.json").read_text())
-        self.assertEqual(state["stages"]["thermal_export"]["status"], "failed")
+        self.assertEqual(state["stages"]["temperature_export"]["status"], "failed")
 
     def test_successful_process_without_required_outputs_is_failure(self):
         with self.assertRaisesRegex(BatchError, "required output"):

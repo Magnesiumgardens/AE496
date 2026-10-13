@@ -3,11 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from .aero import aerodynamic_summary, reference_state, report_scalar
+from .aero import reference_state, report_scalar
 from .cfd import launch_solver
 
-from .thermal_export import export_thermal_bc_package
 from .utils import work_paths
+from .utils import file_sha256
+from .temperature_export import atomic_csv
 
 
 class SolverPipelineError(RuntimeError):
@@ -49,13 +50,12 @@ def _matching_zone_names(bc, base_name: str) -> list[str]:
     return sorted(set(matches))
 
 def _set_wall_thermal(wall, thermal_cfg: dict) -> dict:
-    # This is the CFD reference boundary, not the transient solid temperature.
-    if thermal_cfg["mode"] != "fixed_temperature":
-        raise SolverPipelineError("Use a fixed-temperature CFD heating reference")
-    temperature = float(thermal_cfg["wall_temperature_k"])
-    wall.thermal.thermal_condition = "Temperature"
-    wall.thermal.temperature = temperature
-    return {"thermal_condition": "Temperature", "wall_temperature_k": temperature}
+    if thermal_cfg != {"mode": "adiabatic"}:
+        raise SolverPipelineError("This study requires an adiabatic wall with no thermal loading")
+    wall.thermal.thermal_condition = "Heat Flux"
+    wall.thermal.heat_flux.option = "value"
+    wall.thermal.heat_flux.value = 0.0
+    return {"thermal_condition": "Heat Flux", "heat_flux_W_m2": 0.0}
 
 
 def _temperature_summary(solver, wall_names: list[str]) -> dict:
@@ -68,12 +68,6 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
     }
 
     for _, (name, rtype) in specs.items():
-        try:
-            if name in reports.get_object_names():
-                reports.delete(name_list=[name])
-        except Exception:
-            pass
-
         reports[name] = {
             "surface_names": wall_names,
             "report_type": rtype,
@@ -83,6 +77,65 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
     compute = solver.settings.solution.report_definitions.compute
     return {key: report_scalar(compute(report_defs=[name]), name)
             for key, (name, _) in specs.items()}
+
+
+def _iterate_with_temperature_history(solver, cfg, wall_names):
+    """Sample steady temperature convergence only with a measured iteration counter."""
+    import math
+    from numbers import Real
+    iterations = int(cfg["solver"].get("max_iterations", 1200))
+    options = cfg["solver"].get("temperature_history", {})
+    iterate = solver.settings.solution.run_calculation.iterate
+    if not options.get("enabled", True):
+        iterate(iter_count=iterations)
+        return {"status": "disabled"}
+    interval = int(options.get("sample_every_iterations", 25))
+    rows, requested = [], 0
+    try:
+        available = solver.rp_vars.allowed_values()
+        counter = next((name for name in ("iteration", "iterations", "iteration-count", "global-iteration")
+                        if name in available), None)
+        if counter is None:raise ValueError("Fluent exposes no supported actual iteration counter")
+        def sample():
+            value = solver.rp_vars(counter)
+            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0 or not float(value).is_integer():
+                raise ValueError("Invalid actual iteration counter")
+            temperatures = _temperature_summary(solver, wall_names)
+            if not (0 < temperatures["wall_temperature_min_k"] <= temperatures["wall_temperature_avg_k"]
+                    <= temperatures["wall_temperature_max_k"]):
+                raise ValueError("Nonphysical or inconsistent wall-temperature sample")
+            return dict(iteration=int(value), **temperatures)
+        rows.append(sample())
+    except Exception as exc:
+        print(f"[temperature-history] Unavailable: {exc}; continuing the steady solve.", flush=True)
+        iterate(iter_count=iterations)
+        return {"status": "unavailable", "error": str(exc)}
+    status, error = "complete", None
+    while requested < iterations:
+        chunk = min(interval, iterations - requested)
+        iterate(iter_count=chunk)
+        requested += chunk
+        try:
+            row = sample()
+            advanced = row["iteration"] - rows[-1]["iteration"]
+            if advanced <= 0 or advanced > chunk:raise ValueError("Actual iteration counter did not advance as requested")
+            rows.append(row)
+            if advanced < chunk:break  # Fluent stopped this chunk early.
+        except Exception as exc:
+            status, error = "partial", str(exc)
+            print(f"[temperature-history] Capture stopped: {exc}; retaining measured samples.", flush=True)
+            if requested < iterations:iterate(iter_count=iterations - requested)
+            break
+    path = work_paths(cfg)["work"] / "solver_temperature_history.csv"
+    try:
+        atomic_csv(path, rows)
+        digest = file_sha256(path)
+    except OSError as exc:
+        print(f"[temperature-history] Could not save optional history: {exc}; preserving the CFD solution.", flush=True)
+        return {"status": "unavailable", "error": str(exc)}
+    return dict(status=status, error=error, csv=path.name, csv_sha256=digest,
+                sample_count=len(rows), iteration_counter=counter,
+                interpretation="Steady CFD convergence versus measured Fluent iteration; not physical time.")
 
 
 def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
@@ -113,8 +166,11 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
         )
         setup.general.solver.time = "steady"
 
+        # Adiabatic walls do not disable the fluid energy equation. Compression
+        # and viscous effects still determine the hot gas/recovery temperatures.
         energy = setup.models.energy
         energy.enabled = True
+        setup.models.radiation.model = "none"
         try:
             if energy.viscous_dissipation.is_active():
                 energy.viscous_dissipation = True
@@ -205,7 +261,7 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
                 cfg["thermal"],
             )
 
-        summary["cfd_reference_wall_temperature_K"] = cfg["thermal"].get("wall_temperature_k")
+        summary["thermal_mode"] = "adiabatic"
         summary["wall_thermal_setup"] = wall_thermal_setup
         summary["body_wall_zones"] = wall_zones
         summary["farfield_zones"] = far_zones
@@ -228,9 +284,7 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
 
             print(f"[solve] Running up to {n} steady iterations...")
 
-            solver.settings.solution.run_calculation.iterate(
-                iter_count=n
-            )
+            summary["temperature_history"] = _iterate_with_temperature_history(solver, cfg, wall_zones)
 
         else:
             print(
@@ -238,97 +292,18 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
                 "setup completed, solve skipped."
             )
 
-        # Only generate solution-derived reports after an actual solve.
         summary["solution_status"] = "iterations_completed" if ran_iterations else "setup_only"
         summary["convergence_status"] = "not_verified"
-        if ran_iterations:
-            if cfg.get("aero", {}).get("enabled", True):
-                try:
-                    summary["aerodynamics"] = aerodynamic_summary(solver, cfg, wall_zones)
-                except Exception as exc:
-                    summary["aerodynamics"] = {"status": "failed", "error": str(exc)}
-                    print(f"[aero] ERROR: {exc}")
-
-            if bool(
-                cfg.get("outputs", {}).get(
-                    "compute_temperature_summary",
-                    True,
-                )
-            ):
-                try:
-                    summary.update(
-                        _temperature_summary(
-                            solver,
-                            wall_zones,
-                        )
-                    )
-                except Exception as e:
-                    summary["temperature_summary_error"] = str(e)
-
-            # Export teammate-ready aerothermal boundary conditions.
-            if bool(
-                cfg.get("thermal_export", {}).get(
-                    "enabled",
-                    True,
-                )
-            ):
-                try:
-                    print(
-                        "[thermal-export] Exporting aerothermal "
-                        "boundary-condition package..."
-                    )
-
-                    summary["thermal_bc_package"] = (
-                        export_thermal_bc_package(
-                            solver=solver,
-                            cfg=cfg,
-                            wall_zones=wall_zones,
-                        )
-                    )
-
-                except Exception as e:
-                    summary["thermal_bc_export_error"] = str(e)
-
-                    print(
-                        "[thermal-export] ERROR: "
-                        f"{e}"
-                    )
-
-            # Optional legacy Fluent-native heat-flux export.
-            if bool(
-                cfg.get("outputs", {}).get(
-                    "export_custom_heat_flux",
-                    False,
-                )
-            ):
-                try:
-                    solver.settings.file.export.custom_heat_flux(
-                        file_name=str(paths["heat_flux"]),
-                        wall_function=False,
-                        surface_name_list=wall_zones,
-                    )
-
-                    summary["custom_heat_flux_file"] = str(
-                        paths["heat_flux"]
-                    )
-
-                except Exception as e:
-                    summary["custom_heat_flux_export_error"] = str(e)
-
-        else:
-            summary["solution_postprocessing"] = (
-                "Skipped because run_iterations=false."
-            )
+        # Post-processing is a separate saved-case stage. Persist the solution
+        # before any field/report adapter can fail.
 
         if bool(cfg.get("outputs", {}).get("write_case_data", True)):
             print(f"[solve] Writing final case/data: {paths['final_case']}")
             solver.settings.file.write_case_data(file_name=str(paths["final_case"]))
+            if summary.get("temperature_history", {}).get("status") in ("complete", "partial"):
+                summary["temperature_history"]["source_sha256"] = {
+                    key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
 
-        if "aerodynamics" in summary:
-            # Save after final case/data so resume can detect stale force outputs.
-            (Path(cfg["project"]["work_dir"]) / "aero_summary.json").write_text(
-                json.dumps(summary["aerodynamics"], indent=2), encoding="utf-8"
-            )
         paths["summary"].write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return summary
     finally:

@@ -89,18 +89,19 @@ class Fluent251Adapters(unittest.TestCase):
         def plain(value):return SimpleNamespace(get_state=lambda: value)
         cfg = config(direction=(-1, 0))
         cfg["physics"] = {"viscous_model": "laminar", "air": {}}
-        cfg["thermal"] = {"mode": "fixed_temperature", "wall_temperature_k": 300}
+        cfg["thermal"] = {"mode": "adiabatic"}
         far = SimpleNamespace(momentum=SimpleNamespace(
             mach_number=scalar(8), gauge_pressure=scalar(1090),
             flow_direction=plain([{"option": "value", "value": -1}, {"option": "value", "value": 0}])),
             thermal=SimpleNamespace(temperature=scalar(226.5)))
         farfields = ExistingReports({"farfield": far})
         walls = ExistingReports({"body_wall": SimpleNamespace(thermal=SimpleNamespace(
-            thermal_condition=plain("Temperature"), temperature=scalar(300)))})
+            thermal_condition=plain("Heat Flux"), heat_flux=scalar(0)))})
         solver = SimpleNamespace(settings=SimpleNamespace(setup=SimpleNamespace(
             general=SimpleNamespace(operating_conditions=SimpleNamespace(operating_pressure=plain(0))),
             boundary_conditions=SimpleNamespace(pressure_far_field=farfields, wall=walls),
-            models=SimpleNamespace(viscous=SimpleNamespace(model=plain("laminar"))),
+            models=SimpleNamespace(viscous=SimpleNamespace(model=plain("laminar")),
+                energy=SimpleNamespace(enabled=plain(True)), radiation=SimpleNamespace(model=plain("none"))),
             materials=SimpleNamespace(fluid={"air": SimpleNamespace(
                 density=SimpleNamespace(option=plain("ideal-gas")),
                 viscosity=SimpleNamespace(option=plain("sutherland")))}))))
@@ -123,6 +124,7 @@ class Fluent251Adapters(unittest.TestCase):
                 root = Path(directory)
                 cfg = config()
                 cfg["project"] = {"name": "blunt_1", "work_dir": directory}
+                cfg["thermal"] = {"mode": "adiabatic"}
                 for name in ("04_final.cas.h5", "04_final.dat.h5"):
                     (root / name).write_bytes(b"existing simulation")
                 events = []
@@ -134,17 +136,17 @@ class Fluent251Adapters(unittest.TestCase):
                     exit=lambda: events.append(("exit", {})))
                 def heating(session, settings, walls):
                     self.assertEqual(walls, ["body_wall"])
-                    path = root / "thermal_bc/body_wall_faces.csv"
+                    path = root / "temperature/wall_temperatures.csv"
                     path.parent.mkdir()
-                    path.write_text("saved heating\n")
-                    return {"status": "complete", "body_wall_faces_csv": str(path)}
+                    path.write_text("saved temperatures\n")
+                    return {"status": "complete", "wall_temperatures_csv": str(path)}
                 def forces(*args):
-                    self.assertTrue((root / "thermal_bc/body_wall_faces.csv").is_file())
+                    self.assertTrue((root / "temperature/wall_temperatures.csv").is_file())
                     if fails:raise RuntimeError("force export failed")
                     return {"status": "complete", "drag_per_unit_span_N_m": 12.0}
                 with patch("pipeline.cfd.launch_solver", return_value=solver), \
                      patch("pipeline.cfd.validate_saved_conditions"), \
-                     patch("pipeline.cfd.export_thermal_bc_package", side_effect=heating), \
+                     patch("pipeline.cfd.export_temperatures", side_effect=heating), \
                      patch("pipeline.cfd.aerodynamic_summary", side_effect=forces):
                     if fails:
                         with self.assertRaisesRegex(RuntimeError, "force export failed"):
@@ -154,7 +156,7 @@ class Fluent251Adapters(unittest.TestCase):
                 for name in ("04_final.cas.h5", "04_final.dat.h5"):
                     self.assertEqual((root / name).read_bytes(), b"existing simulation")
                 self.assertEqual([kind for kind, _ in events], ["read", "exit"])
-                self.assertEqual((root / "thermal_bc/body_wall_faces.csv").read_text(), "saved heating\n")
+                self.assertEqual((root / "temperature/wall_temperatures.csv").read_text(), "saved temperatures\n")
                 self.assertEqual(json.loads((root / "aero_summary.json").read_text())["status"],
                                  "failed" if fails else "complete")
 

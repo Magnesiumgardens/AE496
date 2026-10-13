@@ -2,6 +2,12 @@ from pathlib import Path
 import json
 import os
 import tempfile
+import hashlib
+
+
+def file_sha256(path):
+    with Path(path).open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def work_paths(cfg):

@@ -1,177 +1,146 @@
-# AE496 — hypersonic nose study
+# AE496 — adiabatic hypersonic nose study for CDR
 
-A config-driven **planar 2-D CFD → transient thermal → nose comparison** workflow
-using licensed Ansys 2025 R1, PyFluent, SpaceClaim and MAPDL. One command handles a
-case or batch; reports read saved data and do not rerun simulations.
+A planar 2-D Ansys 2025 R1 workflow: **mesh → adiabatic CFD → gas/wall temperature export → aerodynamic forces → per-nose and comparison plots**.
 
-## Start on Windows
+## Boundary condition and interpretation
 
-Use a fresh project folder, keep your CAD files in `geometry_batch/`, and run
-these commands from the repository root. Python 3.12 is the tested version;
-the pinned numerical dependencies require Python 3.12 or later.
+Every vehicle-wall edge uses Fluent **Heat Flux = 0 W/m²**. No wall temperature is prescribed, and radiation is disabled. The fluid energy equation remains enabled: compression, shocks and viscous effects can heat the gas even though no heat crosses the wall.
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe study.py run --geometry ".\geometry_batch\blunt_1.x_t" --stop-after mesh
+```yaml
+thermal:
+  mode: adiabatic
 ```
 
-Inspect that first mesh and its inflation layer before proceeding. SpaceClaim
-251 is selected explicitly because that backend worked on your installation.
-The geometry must be **one XY fluid surface: outer farfield minus body hole**.
-No CAD or fabricated simulation outputs are included in this repository.
+The wall temperature is the CFD's adiabatic/recovery temperature. It is not a transient solid temperature or a material-temperature prediction. There is no film coefficient, cold-wall heat-load mapping, MAPDL solid solve or 400-second solid exposure in this workflow.
 
-Resume that case through the complete workflow:
+`wall_temperatures.csv` contains two distinct requests for the same wall faces:
+
+- `wall_temperature_K`: face values with boundary values enabled.
+- `near_wall_fluid_temperature_K`: cell-based surface values with boundary values disabled, where Fluent supports that distinction.
+
+Both are static temperatures in kelvin. CSV coordinates are **wall-face centroids**, not fluid-cell centers or positions at a specified distance from the wall. Near-wall values depend on the mesh and Fluent's surface interpolation; they can be close to wall values under an adiabatic condition. The optional fluid-node export records actual sampled node coordinates and interpolated static temperatures throughout available interior surfaces. An unavailable optional node map is reported explicitly.
+
+The exporter verifies the saved wall boundary condition and checks that exported wall heat flux is zero within the configured numerical tolerance (default 1 W/m²). It rejects an isothermal saved case instead of relabeling its results.
+
+## Update your existing Windows folder
+
+The maintained branch is `codex/nose-trade-foundation`. Retrieve updates through authenticated Git. For the first complete update, use the temporary source checkout from the preceding update commands:
 
 ```powershell
+git -C "$src" pull --ff-only
+if ($LASTEXITCODE -eq 0) {
+    .\.venv\Scripts\python.exe "$src\scripts\update_project.py" --git-repo "$src" --root "."
+}
+```
+
+If that PowerShell window has been closed, create a new source checkout first:
+
+```powershell
+$src = Join-Path $env:TEMP ("AE496-source-" + [guid]::NewGuid().ToString("N"))
+git clone --single-branch --branch codex/nose-trade-foundation https://github.com/Magnesiumgardens/AE496.git $src
+```
+
+The complete updater backs up code/configuration under `logs/source_backups/`, preserves CAD and existing simulation files, and converts the root template and `runs/*/_batch/config.yaml` to adiabatic. It preserves flight, geometry, meshing and reference-width choices. Solver/export records are invalidated while the existing mesh record remains reusable. Old CFD and solid outputs are archived under the case's `_history/` before the new CFD solve.
+
+**Future updates require one command:**
+
+```powershell
+.\.venv\Scripts\python.exe study.py update
+```
+
+This uses Git clone/pull with `--ff-only` in an owned `.runtime/source_checkout`, then runs the same backed-up installer. It works even if your current project folder was originally downloaded as a ZIP. It does not reset your project's Git checkout.
+
+For a case configuration outside `runs/*/_batch`, explicitly migrate it:
+
+```powershell
+.\.venv\Scripts\python.exe study.py migrate --config "path\to\case.yaml"
+```
+
+## Run the adiabatic study
+
+Resume `blunt_1` using its authoritative case configuration:
+
+```powershell
+.\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml"
+```
+
+This reuses an unchanged existing mesh, reruns CFD with the new wall condition, exports temperature/drag data and creates reports. The former 300 K solution cannot establish an adiabatic result; one new CFD solve is necessary.
+
+For a new nose:
+
+```powershell
+.\.venv\Scripts\python.exe study.py run --geometry ".\geometry_batch\blunt_1.x_t" --stop-after mesh
 .\.venv\Scripts\python.exe study.py run --geometry ".\geometry_batch\blunt_1.x_t"
 ```
 
-Run all geometries sequentially, or regenerate reports separately:
+Inspect the first mesh and boundary-layer resolution. Geometry must be one XY fluid surface: outer farfield minus the body hole. SpaceClaim 251 is selected because it works on this installation. Fluent's 2-D meshing workflow uses a **3-D meshing host** with Prime 2-D enabled; the exported mesh and CFD solver remain planar 2-D.
+
+Batch all noses, or regenerate saved reports without Ansys:
 
 ```powershell
 .\.venv\Scripts\python.exe study.py batch --batch-config batch.yaml
 .\.venv\Scripts\python.exe study.py report --runs-dir runs
 ```
 
-An existing case config can be used directly:
+Re-export an already solved adiabatic case, or inspect its available temperature fields:
 
 ```powershell
-.\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml"
-```
-
-The familiar older entry points remain thin compatibility wrappers, all using
-`--config` for case selection. They share the same implementation.
-
-Fluent 2025 R1's 2-D meshing workflow runs inside a **3-D meshing host** with
-Prime 2-D enabled; the resulting mesh and CFD solver remain planar 2-D. Saved
-force reports are reused during export. The adapters accept the 251 boundary
-value groups and report value/iteration records without mistaking iteration
-indices for physical values.
-
-For an existing installation with manually patched adapters,
-`scripts/update_adapters.py --revision <full-commit-sha>` installs the five
-consolidated adapter files from that immutable GitHub revision. It downloads
-and compiles all files first, saves the previous source under
-`logs/source_backups/`, and retains configurations and simulation outputs.
-For private GitHub repositories, retrieve the updater through Git and pass
-`--git-repo <source-checkout>`: it reads the pinned files from Git without making
-unauthenticated raw-file requests. The source checkout may be a temporary clone;
-the target project defaults to the current working directory.
-
-## Configuration and physics
-
-- `config.yaml`: common CFD/mesh template. The batch replaces `project.name`,
-  `project.work_dir`, and `geometry.input_file` for each nose.
-- `batch.yaml`: geometry directory, sequential execution, resume and limits.
-- `thermal_analysis.yaml`: material, duration, thermal mesh, radiation and plots.
-
-**New airflow points toward −X into the +X nose**, as confirmed. Drag is positive
-along the configured flow; lift uses its perpendicular. Existing historical
-results are not rotated or relabeled when settings change.
-
-Fluent uses an explicit reference wall temperature to calculate heating.
-MAPDL then applies **direct prescribed heat flux**, with evolving solid
-conduction temperature and optional radiation. That reference temperature does
-not constrain the solid temperature. There is **no adiabatic-reference stage**,
-no endpoint-derived film coefficient, and no hidden fallback between models.
-The prescribed CFD flux is not recomputed as the solid heats; this is a screening
-assumption, not two-way CFD/thermal coupling.
-
-The export field name and raw-to-into-wall sign are explicit in
-`thermal_export`. Check them on your known case before batch heating analysis;
-the code never automatically flips values to obtain positive heating. You can
-inspect the available saved-case fields with:
-
-```powershell
+.\.venv\Scripts\python.exe study.py export --config ".\runs\blunt_1\_batch\config.yaml"
 .\.venv\Scripts\python.exe study.py export --config ".\runs\blunt_1\_batch\config.yaml" --inspect-fields
 ```
 
-Aerodynamic outputs are **N/m of span**, appropriate for planar sections.
-`Cd` and `Cl` stay undefined until `aero.reference_area_per_unit_span_m` is set
-to a justified common reference width (`A_ref / span`). No 3-D area is guessed.
-Reference normalization uses the configured perfect-gas gamma and R. Total
-forces include pressure and viscous contributions; a separate split is not yet
-reported. `design_limits.max_temperature_k` is optional and never invented.
+Airflow remains toward −X into the +X nose. Drag/lift are planar sectional forces in **N/m of span**. `Cd`/`Cl` require a justified common `aero.reference_area_per_unit_span_m`; no 3-D reference area is guessed.
 
-The solid outline/mass estimate is reconstructed from CFD wall-face centroids,
-with filled uniform-material cross-section assumptions. Review temperature
-limits, constant material properties, gas model, convergence and mesh sensitivity
-before making a final nose selection.
+## Data and plots
 
-## Data and resume
-
-Every nose has one authoritative directory:
+Each nose has one directory:
 
 ```text
-geometry_batch/<nose>.x_t
 runs/<nose>/
-  _batch/config.yaml          # exact case selection
-  _batch/stage_state.json     # stage input/output fingerprints
-  01_labeled_geometry.pmdb/
+  _batch/config.yaml
+  _batch/stage_state.json
   02_mesh.msh.h5
-  03_setup.cas.h5
   04_final.cas.h5
   04_final.dat.h5
   summary.json
+  solver_temperature_history.csv  # when an actual iteration counter is available
   aero_summary.json
-  thermal_bc/body_wall_faces.csv
-  thermal_analysis/
-    thermal_summary.json
-    temperature_history.csv
-    wall_temperature_history.csv
-    wall_temperature_final.csv
-    thermal_nodes_final.csv
-    thermal_snapshots.npz
-    visualization/           # temperature/flux maps, histories, optional GIF
-  reports/                   # per-nose wall history/profile CSVs and plots
+  temperature/
+    wall_temperatures.csv
+    temperature_summary.json
+    fluid_temperature_nodes.csv   # when supported
+  reports/                        # individual maps, profiles and diagnostics
   batch_logs/
-runs/comparison/             # cross-nose CSVs, plots and trade screening
+  _history/                       # retained superseded results
+runs/comparison/
+  adiabatic_temperature_summary.csv
+  adiabatic_temperature_profiles.csv
+  adiabatic_report.json
+  wall_temperature_K_comparison.png
+  near_wall_fluid_temperature_K_comparison.png
+  drag_vs_near_wall_temperature.png
 ```
 
-Resume checks mesh, solver, export, forces and thermal stages independently.
-Changing inputs invalidates affected stages using SHA-256 fingerprints;
-completed upstream stages remain reusable. Previous artifacts are retained in
-`runs/<nose>/_history/` before replacement. Older results without fingerprints
-can be adopted with explicitly unverified provenance rather than discarded.
+Per-nose CSVs preserve coordinates, face identity, wall distance, both temperature definitions and diagnostic wall heat flux. Wall profiles are normalized back → nose → back with the nose at 0.5. Temperature means are length weighted. Reports exclude old isothermal cases and stale exports; export provenance includes hashes of the case/data pair and CSV. Comparisons require matching flow, physics, mesh settings and force normalization.
 
-Wall comparisons preserve **maximum as solid, mean as dashed, one color per
-nose**. The mean is explicitly the arithmetic mean of saved wall samples,
-separate from the nodal mean of the entire solid. Final profiles use back → nose
-→ back; new normalized profiles map each side's physical arc length to half the
-range, while original physical distances remain in the CSV. Imported normalized
-positions remain exactly as supplied. Drag/heating/temperature trade plots show
-screening Pareto candidates, not an automatically selected winner.
+Temperature convergence histories sample minimum, length-weighted mean and maximum wall temperature every 25 measured Fluent iterations when the backend exposes a supported actual iteration counter. Individual and cross-nose history plots label the x-axis **Fluent iteration**, with maximum solid and mean dashed. If a counter is unavailable, history capture is explicitly marked unavailable and the steady solve continues; no iteration or physical-time history is fabricated.
 
-## Existing result examples
-
-The supplied historical CSVs are retained under `examples/reference_results`.
-They contain results from the previous project, including legacy convection
-columns, and **are not new simulations of the direct-flux model**. Reproduce
-those comparisons without installing/running Ansys products:
+The older temperature-versus-time plots came from solid transient heating. Steady adiabatic CFD cannot generate a physical 400-second temperature history. Historical supplied CSVs remain available under `examples/reference_results`; reproduce their earlier comparisons explicitly:
 
 ```powershell
-.\.venv\Scripts\python.exe study.py report --reference-dir examples/reference_results --output-dir examples/reference_report
+.\.venv\Scripts\python.exe study.py report --reference-dir examples/reference_results --output-dir runs/historical_comparison
 ```
 
-![Historical wall-temperature histories](examples/reference_report/wall_temperature_history_comparison.png)
+Historical plots are not new adiabatic CFD results. The legacy solid thermal runner refuses execution.
 
-![Historical normalized wall-temperature profiles](examples/reference_report/final_wall_temperature_normalized_position.png)
+## Validation and CDR use
 
-## Validation and cloud use
-
-Unit tests cover numerical data, wall mapping, force normalization, workflow
-adapters, stage-aware resume and saved-result reports. Ansys calls use fixtures
-in tests; **a licensed Windows full-case run is still required** to verify the
-rebuilt meshing/export/thermal adapters, especially boundary-layer scope and
-heat-flux field/sign. Completing iterations does not certify convergence.
+Tests cover wall settings and pinned Fluent251 schemas, temperature sampling, zero-flux rejection, configuration migration, reuse/archive behavior, saved-case guards, reporting and updater preservation. The cloud supports development and offline plots but has no licensed Ansys engines. A Windows run is still required to verify the new adiabatic solve and temperature exports.
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The cloud machine supports Python development and offline reports. Its PyAnsys
-client imports and dependencies are checked, but it has no Ansys products
-installed. Set it up from the existing checkout with `bash scripts/setup_cloud.sh`;
-source `scripts/activate_cloud.sh` in subsequent shells for writable caches and
-the prepared virtual environment. No Git worktree is needed for cloud tasks.
+For CDR conclusions, assess residuals and force/temperature stability, mesh sensitivity, gas-property assumptions and the applicability of planar 2-D flow. Adiabatic recovery temperatures do not establish material survivability, insulation performance or a best nose by themselves. The current air model uses ideal-gas density and Sutherland viscosity; high-temperature gas physics may materially affect absolute temperatures.
+
+A fresh Windows setup uses Python 3.12 or later and `pip install -r requirements.txt`. In the cloud, run `bash scripts/setup_cloud.sh` and source `scripts/activate_cloud.sh` from the existing checkout. No Git worktree is needed.

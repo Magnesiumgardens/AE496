@@ -1,6 +1,5 @@
-# CFD reference case template for the planar hypersonic nose study.
-# CFD uses a prescribed wall temperature to calculate q''; the solid thermal
-# solver then evolves its own temperature under that direct flux + radiation.
+# Adiabatic planar CFD template for the CDR nose study.
+# Zero wall heat transfer; temperatures and drag come from the fluid solution.
 # Batch generates a separate case config and work directory for each CAD file.
 
 project:
@@ -31,12 +30,12 @@ mesh:
   global_max_size: 0.020
   curvature_normal_angle_deg: 18.0
 
-  # Strong local curvature refinement remains active for heat-transfer work.
+  # Strong local curvature refinement remains active for near-wall temperature gradients.
   body_min_size: 0.00015
   body_max_size: 0.0010
   body_curvature_normal_angle_deg: 8.0
 
-  # Boundary layers matter for viscous drag and wall heating.
+  # Boundary layers matter for viscous drag and near-wall resolution.
   # Retry without inflation only after an explicit boundary-layer stage marker.
   # Cases with different boundary-layer settings are not ranked together.
   boundary_layer:
@@ -63,19 +62,9 @@ physics:
     sutherland_effective_temperature_k: 110.56
 
 thermal:
-  # Fluent reference wall temperature for the heating calculation.
-  # This does not hold the transient MAPDL solid at 300 K.
-  mode: fixed_temperature
-  wall_temperature_k: 300.0
-
-  # Retained from the current project assumption.  Replace with measured/
-  # selected surface emissivity when the TPS surface is finalized.
-  emissivity: 0.90
-
-  # More defensible PDR ambient-radiation reference than a 3 K deep-space sink
-  # for an atmospheric Mach-8 glide segment.  Its effect is small at very high
-  # wall temperature because radiation scales with T_w^4.
-  external_radiation_temperature_k: 226.5
+  # All body-wall edges have prescribed heat flux q'' = 0 W/m².
+  # Fluid energy remains enabled; wall/gas temperature is a solution output.
+  mode: adiabatic
 
 solver:
   density_solver: density-based-implicit
@@ -83,19 +72,21 @@ solver:
   max_iterations: 1200
   run_iterations: true
   hybrid_initialize: true
+  temperature_history:
+    enabled: true
+    sample_every_iterations: 25
 
-thermal_export:
+temperature_export:
   enabled: true
-  output_directory: thermal_bc
-  heat_flux_field_name: heat-flux
-  # Explicit raw-field to INTO-WALL convention. Verify on the known case;
-  # use -1 only if Fluent's selected field uses the opposite convention.
-  heat_flux_into_wall_sign: 1.0
+  output_directory: temperature
+  static_temperature_field: temperature
+  heat_flux_field: heat-flux
+  zero_flux_tolerance_W_m2: 1.0
+  # Optional nodal fluid map; wall and fluid-side face temperatures are required.
+  export_fluid_nodes: true
 
 outputs:
   write_case_data: true
-  export_custom_heat_flux: false
-  compute_temperature_summary: true
 
 # Planar sectional screening, not an axisymmetric or whole-vehicle model.
 aero:

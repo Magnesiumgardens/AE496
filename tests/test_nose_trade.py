@@ -72,15 +72,16 @@ class AeroTests(unittest.TestCase):
         setting = lambda value: SimpleNamespace(get_state=lambda: value)
         cfg = config()
         cfg["physics"] = {"viscous_model": "laminar", "air": {}}
-        cfg["thermal"] = {"mode": "fixed_temperature", "wall_temperature_k": 300}
+        cfg["thermal"] = {"mode": "adiabatic"}
         far = SimpleNamespace(momentum=SimpleNamespace(
             mach_number=setting(8), gauge_pressure=setting(1090), flow_direction=setting([1, 0])),
             thermal=SimpleNamespace(temperature=setting(226.5)))
         walls = Reports({"body_wall.1": SimpleNamespace(thermal=SimpleNamespace(
-            thermal_condition=setting("Temperature"), temperature=setting(300)))})
+            thermal_condition=setting("Heat Flux"), heat_flux=setting(0)))})
         setup = SimpleNamespace(
             general=SimpleNamespace(operating_conditions=SimpleNamespace(operating_pressure=setting(0))),
-            models=SimpleNamespace(viscous=SimpleNamespace(model=setting("laminar"))),
+            models=SimpleNamespace(viscous=SimpleNamespace(model=setting("laminar")),
+                energy=SimpleNamespace(enabled=setting(True)), radiation=SimpleNamespace(model=setting("none"))),
             materials=SimpleNamespace(fluid={"air": SimpleNamespace(
                 density=SimpleNamespace(option=setting("ideal-gas")),
                 viscosity=SimpleNamespace(option=setting("sutherland")))}),
@@ -91,10 +92,10 @@ class AeroTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rerun CFD"):
             validate_saved_conditions(solver, cfg)
         cfg["flight"]["mach"] = 8
-        cfg["thermal"]["wall_temperature_k"] = 350
-        with self.assertRaisesRegex(ValueError, "wall temperature"):
+        walls["body_wall.1"].thermal.heat_flux = setting(10)
+        with self.assertRaisesRegex(ValueError, "wall heat flux"):
             validate_saved_conditions(solver, cfg)
-        cfg["thermal"]["wall_temperature_k"] = 300
+        walls["body_wall.1"].thermal.heat_flux = setting(0)
         cfg["physics"]["air"]["sutherland_reference_viscosity"] = 1.716e-5
         setup.materials.fluid["air"].viscosity.sutherland = SimpleNamespace(
             reference_viscosity=setting(2e-5))
@@ -217,7 +218,7 @@ class BatchTests(unittest.TestCase):
                 "analysis": {"initial_temperature_k": 300}})
             (thermal / "thermal_summary.json").write_text(original)
             (thermal / "temperature_history.csv").write_text("time_s,maximum_K\n5,700\n10,400\n")
-            rows, created = compare_nose_trade.compare(root, root / "comparison")
+            rows, created = compare_nose_trade.compare(root, root / "comparison", reference_dir=root / "no_extra_references")
             self.assertEqual(rows[0]["peak_temperature_K"], 700)
             self.assertEqual(rows[0]["final_max_temperature_K"], 400)
             self.assertEqual(rows[0]["applied_heat_load_per_unit_span_J_m"], "")

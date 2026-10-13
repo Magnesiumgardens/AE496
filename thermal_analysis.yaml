@@ -1,4 +1,5 @@
-# Transient 2-D solid thermal analysis with direct CFD heat-flux loading.
+# Legacy settings retained for interpreting historical solid-temperature data.
+# Not used by the adiabatic CFD study; the solid thermal runner is disabled.
 # Wall temperature evolves under conduction and optional radiation.
 # No adiabatic reference solution or endpoint-derived convection is required.
 

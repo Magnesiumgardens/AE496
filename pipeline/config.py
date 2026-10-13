@@ -30,11 +30,11 @@ def positive(name, value):
 
 def validate_config(cfg):
     for name in ("project.name", "project.work_dir", "geometry.input_file",
-                 "flight.flow_direction", "thermal.mode", "thermal.wall_temperature_k",
+                 "flight.flow_direction", "thermal.mode",
                  "physics.air", "solver.max_iterations"):
         _required(cfg, name)
     for name in ("flight.mach", "flight.static_pressure_pa", "flight.static_temperature_k",
-                 "thermal.wall_temperature_k", "mesh.global_min_size", "mesh.global_max_size",
+                 "mesh.global_min_size", "mesh.global_max_size",
                  "mesh.body_min_size", "mesh.body_max_size"):
         positive(name, _required(cfg, name))
     for prefix in ("global", "body"):
@@ -51,11 +51,12 @@ def validate_config(cfg):
     if not math.isfinite(mag) or mag == 0:
         raise ConfigError("flight.flow_direction must be finite and nonzero")
     cfg["flight"]["flow_direction"] = [dx / mag, dy / mag]
-    if cfg["thermal"]["mode"] != "fixed_temperature":
-        raise ConfigError(
-            "The direct heat-flux workflow uses thermal.mode=fixed_temperature "
-            "as the CFD heating reference, not as the transient solid temperature."
-        )
+    if cfg["thermal"]["mode"] != "adiabatic":
+        raise ConfigError("This study requires thermal.mode=adiabatic (zero wall heat flux). "
+                          "Run study.py migrate --config <case.yaml> to migrate an old config.")
+    if set(cfg["thermal"]) - {"mode"}:
+        raise ConfigError("Adiabatic configuration must contain only thermal.mode; "
+                          "remove prescribed wall temperatures and radiation settings using study.py migrate.")
     if cfg["geometry"].get("input_kind", "prepared_fluid_surface") != "prepared_fluid_surface":
         raise ConfigError("Expected one prepared XY fluid surface: farfield minus body hole")
     if cfg.get("mesh", {}).get("length_unit", "m") != "m":
@@ -67,15 +68,20 @@ def validate_config(cfg):
     iterations = positive("solver.max_iterations", cfg["solver"]["max_iterations"])
     if not iterations.is_integer():
         raise ConfigError("solver.max_iterations must be an integer")
+    interval = positive("solver.temperature_history.sample_every_iterations",
+                        cfg["solver"].get("temperature_history", {}).get("sample_every_iterations", 25))
+    if not interval.is_integer():
+        raise ConfigError("solver.temperature_history.sample_every_iterations must be an integer")
     for name in ("geometry_start_timeout_s", "fluent_start_timeout_s"):
         positive("runtime." + name, runtime.get(name, 300))
     release_delay = float(runtime.get("meshing_release_delay_s", 10))
     if not math.isfinite(release_delay) or release_delay < 0 or release_delay > 60:
         raise ConfigError("runtime.meshing_release_delay_s must be in [0, 60]")
-    export = cfg.get("thermal_export", {})
-    if float(export.get("heat_flux_into_wall_sign", 1)) not in (-1.0, 1.0):
-        raise ConfigError("thermal_export.heat_flux_into_wall_sign must be +1 or -1")
-    positive("thermal_export.topology_tolerance_m", export.get("topology_tolerance_m", 1e-9))
+    if cfg.get("thermal_export", {}).get("enabled", False):
+        raise ConfigError("Heat-load export is incompatible with this adiabatic study; migrate the config.")
+    export = cfg.get("temperature_export", {})
+    positive("temperature_export.topology_tolerance_m", export.get("topology_tolerance_m", 1e-9))
+    positive("temperature_export.zero_flux_tolerance_W_m2", export.get("zero_flux_tolerance_W_m2", 1.0))
     if cfg.get("aero", {}).get("enabled", True):
         from .aero import reference_state
         reference_state(cfg)

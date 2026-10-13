@@ -2,8 +2,8 @@
 from pathlib import Path
 
 from .aero import aerodynamic_summary, reference_state, validate_saved_conditions
-from .thermal_export import export_thermal_bc_package
-from .utils import atomic_json, work_paths
+from .temperature_export import export_temperatures, temperature_paths
+from .utils import atomic_json, file_sha256, work_paths
 
 
 def launch_solver(cfg, log_subdir="solver_logs"):
@@ -37,9 +37,9 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         if inspect:
             info = solver.fields.field_data.scalar_fields.allowed_values()
             fields = {name: {"field_name": name} for name in info
-                      if "flux" in name.casefold() or "heat" in name.casefold()}
-            atomic_json(paths["work"] / "available_heat_flux_fields.json", fields)
-            print("[export] Heat/flux fields:", ", ".join(fields))
+                      if any(word in name.casefold() for word in ("temp", "flux", "heat"))}
+            atomic_json(paths["work"] / "available_temperature_fields.json", fields)
+            print("[export] Temperature/flux fields:", ", ".join(fields))
             return fields
         validate_saved_conditions(solver, cfg)
         base = cfg["geometry"].get("body_wall_name", "body_wall")
@@ -47,9 +47,13 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                  if z == base or z.startswith(base + ".")]
         result = {}
         if thermal:
-            print("[export] Reading and saving body-wall heating...", flush=True)
-            result["thermal_bc_package"] = export_thermal_bc_package(solver, cfg, walls)
-            print("[export] Thermal BC saved:", result["thermal_bc_package"]["body_wall_faces_csv"], flush=True)
+            print("[export] Checking zero heat flux and saving adiabatic temperatures...", flush=True)
+            result["temperatures"] = export_temperatures(solver, cfg, walls)
+            result["temperatures"]["source_sha256"] = {
+                key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
+            result["temperatures"]["wall_csv_sha256"] = file_sha256(temperature_paths(cfg)[0])
+            atomic_json(temperature_paths(cfg)[1], result["temperatures"])
+            print("[export] Temperatures saved:", result["temperatures"]["wall_temperatures_csv"], flush=True)
         if aero:
             try:
                 print("[export] Computing body-wall forces from saved solution...", flush=True)
@@ -59,7 +63,7 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                 print("[export] Drag:", result["aerodynamics"]["drag_per_unit_span_N_m"], "N/m", flush=True)
             except Exception as exc:
                 atomic_json(paths["work"] / "aero_summary.json", {"status": "failed", "error": str(exc)})
-                print("[export] Aerodynamic export failed; any completed thermal BC export is retained.", flush=True)
+                print("[export] Aerodynamic export failed; completed temperature exports are retained.", flush=True)
                 raise
         return result
     finally:
@@ -69,7 +73,7 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
 def export_cli(thermal=True, aero=True):
     import argparse
     from .config import load_config
-    parser = argparse.ArgumentParser(description="Export saved CFD wall heating and aerodynamic forces")
+    parser = argparse.ArgumentParser(description="Export saved adiabatic temperatures and aerodynamic forces")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--inspect-fields", action="store_true")
     args = parser.parse_args()

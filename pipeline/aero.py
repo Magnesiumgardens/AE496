@@ -127,6 +127,12 @@ def setting_scalar(value):
 def validate_saved_conditions(solver, cfg):
     """Check saved physical conditions before relabeling an existing CFD result."""
     setup = solver.settings.setup
+    if cfg["thermal"] != {"mode": "adiabatic"}:
+        raise ValueError("Saved-result export requires an adiabatic configuration")
+    if not setup.models.energy.enabled.get_state():
+        raise ValueError("Saved case has no fluid energy equation; rerun CFD")
+    if str(setup.models.radiation.model.get_state()).casefold() != "none":
+        raise ValueError("Saved case has radiation enabled; rerun CFD with no heat transfer")
     state = reference_state(cfg)
     base = cfg["geometry"].get("farfield_name", "farfield")
     farfields = setup.boundary_conditions.pressure_far_field
@@ -171,22 +177,14 @@ def validate_saved_conditions(solver, cfg):
     walls = setup.boundary_conditions.wall
     base = cfg["geometry"].get("body_wall_name", "body_wall")
     zones = [z for z in walls.get_object_names() if z == base or z.startswith(base + ".")]
+    if not zones:
+        raise ValueError("Saved case has no matching body-wall boundaries")
     for name in zones:
         thermal = walls[name].thermal
-        desired = cfg["thermal"]["mode"]
         condition = thermal.thermal_condition.get_state()
-        if desired == "fixed_temperature":
-            if str(condition).casefold() != "temperature":
-                raise ValueError("Saved case is not a fixed-temperature wall; rerun CFD")
-            check("wall temperature", thermal.temperature.get_state(), cfg["thermal"]["wall_temperature_k"])
-        elif desired == "radiative_equilibrium":
-            if str(condition).casefold() != "radiation":
-                raise ValueError("Saved case is not a radiation wall; rerun CFD")
-            check("emissivity", thermal.external_emissivity.get_state(), cfg["thermal"]["emissivity"])
-            check("radiation temperature", thermal.ext_rad_temperature.get_state(),
-                  cfg["thermal"]["external_radiation_temperature_k"])
-        else:
-            raise ValueError(f"Unsupported wall thermal mode: {desired}")
+        if str(condition).casefold().replace(" ", "") != "heatflux":
+            raise ValueError("Saved case is not an adiabatic heat-flux wall; rerun CFD")
+        check("wall heat flux", thermal.heat_flux.get_state(), 0.0)
 
 
 def aerodynamic_summary(solver, cfg, wall_zones):

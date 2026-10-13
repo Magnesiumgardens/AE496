@@ -5,14 +5,13 @@ import argparse
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="Resume one CFD → direct-flux thermal case")
+    run = commands.add_parser("run", help="Resume one adiabatic CFD, temperature and drag case")
     selection = run.add_mutually_exclusive_group(required=True)
     selection.add_argument("--config", help="Use an existing authoritative case YAML")
     selection.add_argument("--geometry", help="Create a case config from one CAD file and the base template")
     run.add_argument("--base-config", default="config.yaml")
     run.add_argument("--runs-dir", default="runs")
-    run.add_argument("--thermal-config", default="thermal_analysis.yaml")
-    run.add_argument("--stop-after", choices=("mesh", "solver", "thermal_export", "aero", "thermal"), default="thermal")
+    run.add_argument("--stop-after", choices=("mesh", "solver", "temperature_export", "aero"), default="aero")
     run.add_argument("--no-resume", action="store_true")
     batch = commands.add_parser("batch", help="Run all configured nose geometries sequentially")
     batch.add_argument("--batch-config", default="batch.yaml")
@@ -20,10 +19,20 @@ def main():
     report.add_argument("--runs-dir", default="runs")
     report.add_argument("--output-dir", default="runs/comparison")
     report.add_argument("--reference-dir", help="Import the provided combined historical comparison CSVs")
-    export = commands.add_parser("export", help="Export wall heating and forces from an existing solved case")
+    export = commands.add_parser("export", help="Export adiabatic temperatures and forces from a solved case")
     export.add_argument("--config", required=True)
     export.add_argument("--inspect-fields", action="store_true")
+    migrate = commands.add_parser("migrate", help="Back up and convert an existing config to adiabatic")
+    migrate.add_argument("--config", required=True)
+    commands.add_parser("update", help="Fetch the study branch through Git and update with backups")
     args = parser.parse_args()
+    if args.command == "update":
+        from update import main as update_main
+        return update_main()
+    if args.command == "migrate":
+        from pipeline.migration import migrate_config
+        migrate_config(args.config)
+        return 0
     if args.command == "batch":
         from pipeline.study import main as batch_main
         return batch_main(args.batch_config)
@@ -41,7 +50,14 @@ def main():
             directory = Path(args.runs_dir).resolve() / name
             config_path = directory / "_batch" / "config.yaml"
             write_case_config(load_yaml(args.base_config), geometry, name, directory, config_path)
-        result = run_case(config_path, args.thermal_config, resume=not args.no_resume, stop_after=args.stop_after)
+        result = run_case(config_path, resume=not args.no_resume, stop_after=args.stop_after)
+        if result.get("status") == "complete" and args.stop_after == "aero":
+            from pipeline.gas_reporting import create_gas_reports
+            from pipeline.config import load_config
+            from pathlib import Path
+            cfg = load_config(config_path)
+            work = Path(cfg["project"]["work_dir"])
+            create_gas_reports(work.parent, work.parent / "comparison")
         print(result)
         return 0 if result.get("status") == "complete" else 2
     if args.command == "report":
