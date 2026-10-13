@@ -8,7 +8,6 @@ from .cfd import launch_solver
 
 from .utils import work_paths
 from .utils import file_sha256
-from .temperature_export import atomic_csv
 
 
 class SolverPipelineError(RuntimeError):
@@ -80,62 +79,8 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
 
 
 def _iterate_with_temperature_history(solver, cfg, wall_names):
-    """Sample steady temperature convergence only with a measured iteration counter."""
-    import math
-    from numbers import Real
-    iterations = int(cfg["solver"].get("max_iterations", 1200))
-    options = cfg["solver"].get("temperature_history", {})
-    iterate = solver.settings.solution.run_calculation.iterate
-    if not options.get("enabled", True):
-        iterate(iter_count=iterations)
-        return {"status": "disabled"}
-    interval = int(options.get("sample_every_iterations", 25))
-    rows, requested = [], 0
-    try:
-        available = solver.rp_vars.allowed_values()
-        counter = next((name for name in ("iteration", "iterations", "iteration-count", "global-iteration")
-                        if name in available), None)
-        if counter is None:raise ValueError("Fluent exposes no supported actual iteration counter")
-        def sample():
-            value = solver.rp_vars(counter)
-            if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value < 0 or not float(value).is_integer():
-                raise ValueError("Invalid actual iteration counter")
-            temperatures = _temperature_summary(solver, wall_names)
-            if not (0 < temperatures["wall_temperature_min_k"] <= temperatures["wall_temperature_avg_k"]
-                    <= temperatures["wall_temperature_max_k"]):
-                raise ValueError("Nonphysical or inconsistent wall-temperature sample")
-            return dict(iteration=int(value), **temperatures)
-        rows.append(sample())
-    except Exception as exc:
-        print(f"[temperature-history] Unavailable: {exc}; continuing the steady solve.", flush=True)
-        iterate(iter_count=iterations)
-        return {"status": "unavailable", "error": str(exc)}
-    status, error = "complete", None
-    while requested < iterations:
-        chunk = min(interval, iterations - requested)
-        iterate(iter_count=chunk)
-        requested += chunk
-        try:
-            row = sample()
-            advanced = row["iteration"] - rows[-1]["iteration"]
-            if advanced <= 0 or advanced > chunk:raise ValueError("Actual iteration counter did not advance as requested")
-            rows.append(row)
-            if advanced < chunk:break  # Fluent stopped this chunk early.
-        except Exception as exc:
-            status, error = "partial", str(exc)
-            print(f"[temperature-history] Capture stopped: {exc}; retaining measured samples.", flush=True)
-            if requested < iterations:iterate(iter_count=iterations - requested)
-            break
-    path = work_paths(cfg)["work"] / "solver_temperature_history.csv"
-    try:
-        atomic_csv(path, rows)
-        digest = file_sha256(path)
-    except OSError as exc:
-        print(f"[temperature-history] Could not save optional history: {exc}; preserving the CFD solution.", flush=True)
-        return {"status": "unavailable", "error": str(exc)}
-    return dict(status=status, error=error, csv=path.name, csv_sha256=digest,
-                sample_count=len(rows), iteration_counter=counter,
-                interpretation="Steady CFD convergence versus measured Fluent iteration; not physical time.")
+    from .iteration_history import iterate_with_history
+    return iterate_with_history(solver, cfg, wall_names)
 
 
 def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
@@ -268,9 +213,9 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
 
         print(f"[solve] Boundary zones after correction: {_zone_names(bc)}")
 
-        if bool(cfg.get("solver", {}).get("hybrid_initialize", True)):
-            print("[solve] Hybrid initialization...")
-            solver.settings.solution.initialization.hybrid_initialize()
+        from .solver_numerics import configure_numerics, initialize_flow
+        summary["numerics"] = configure_numerics(solver,cfg)
+        summary["initialization"] = initialize_flow(solver,cfg,far_zones[0])
 
         print(f"[solve] Writing setup case: {paths['setup_case']}")
         solver.settings.file.write(file_name=str(paths["setup_case"]), file_type="case")

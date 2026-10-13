@@ -134,10 +134,43 @@ class StudyResumeTests(unittest.TestCase):
     def test_changed_temperature_export_settings_do_not_rerun_cfd(self):
         self.run_case()
         self.calls.clear()
-        self.cfg["temperature_export"]["zero_flux_tolerance_W_m2"] = 0.5
+        self.cfg["temperature_export"]["topology_tolerance_m"] = 5e-10
         self.write_configs()
         self.run_case()
         self.assertEqual(self.calls, ["temperature_export"])
+
+    def test_changing_h_reuses_cfd_and_reruns_only_mechanical(self):
+        self.thermal_cfg = yaml.safe_load((REPO_ROOT / "thermal_analysis.yaml").read_text())
+        self.thermal_cfg["loading"]["heat_transfer_coefficient_w_m2k"] = 42
+        self.write_configs()
+        def runner(command,log_path,**kwargs):
+            if Path(command[2]).name == "run_thermal_analysis.py":
+                self.calls.append("thermal")
+                for path in stage_files(self.work,load_config(self.config))["thermal"]:
+                    path.parent.mkdir(parents=True,exist_ok=True)
+                    path.write_text(json.dumps({"status":"complete","loading_mode":"convection"}) if path.suffix == ".json" else "solid fixture")
+            else:
+                self.runner(command,log_path,**kwargs)
+                if Path(command[2]).name == "export_temperature_only.py":
+                    (self.work/"temperature/wall_temperature_nodes.csv").write_text("nodal fixture")
+        run_case(self.config,self.thermal,stop_after="thermal",_runner=runner)
+        self.calls.clear()
+        self.thermal_cfg["loading"]["heat_transfer_coefficient_w_m2k"] = 43
+        self.write_configs()
+        run_case(self.config,self.thermal,stop_after="thermal",_runner=runner)
+        self.assertEqual(self.calls,["thermal"])
+
+    def test_failed_residual_screen_stops_all_downstream_stages(self):
+        def runner(command,log_path,**kwargs):
+            self.runner(command,log_path,**kwargs)
+            if Path(command[2]).name == "run_solver_only.py":
+                log_path.parent.mkdir(parents=True,exist_ok=True)
+                log_path.write_text("iter continuity x-velocity y-velocity energy time/iter\n1200 2.8 1.8 2.1 3.8 0:00:00 0\n")
+        with self.assertRaisesRegex(BatchError,"did not converge"):
+            run_case(self.config,self.thermal,_runner=runner)
+        self.assertEqual(self.calls,["mesh","solver"])
+        self.assertTrue((self.work/"04_final.dat.h5").is_file())
+        self.assertFalse((self.work/"temperature/wall_temperatures.csv").exists())
 
     def test_changed_geometry_bytes_invalidate_all_results(self):
         self.run_case()

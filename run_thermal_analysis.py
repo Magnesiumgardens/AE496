@@ -5,7 +5,8 @@ import argparse
 
 from pipeline.thermal import run_thermal_analysis
 from pipeline.config import ConfigError
-from pipeline.thermal_loading import ThermalAnalysisError, validate_settings
+from pipeline.thermal_loading import ThermalAnalysisError
+from pipeline.convection_loading import validate_settings
 
 
 def main(argv=None):

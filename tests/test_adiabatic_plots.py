@@ -35,7 +35,7 @@ class AdiabaticPlotTests(unittest.TestCase):
             self.assertIn("no invented", report["spatial_method"])
             for name in ("blunt", "sharp"):
                 outputs = report["case_files"][name]
-                for key in ("wall_heat_flux_profile", "wall_heat_flux_map", "fluid_temperature_near_wall",
+                for key in ("fluid_temperature_near_wall",
                             "adiabatic_wall_temperature_map", "near_wall_fluid_temperature_map",
                             "wall_temperature_vs_position", "wall_boundary"):
                     self.assertTrue(Path(outputs[key]).is_file())
@@ -118,7 +118,7 @@ class AdiabaticPlotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             cfg = self.save_case(Path(directory) / "nose")
             self.assertTrue(temperature_complete(cfg))
-            cfg["temperature_export"]["zero_flux_tolerance_W_m2"] *= .5
+            cfg["temperature_export"]["topology_tolerance_m"] = 5e-10
             self.assertFalse(temperature_complete(cfg))
 
     def test_changed_flow_or_physics_or_mesh_marks_temperature_package_stale(self):

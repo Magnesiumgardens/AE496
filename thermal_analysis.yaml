@@ -1,45 +1,33 @@
-# Legacy settings retained for interpreting historical solid-temperature data.
-# Not used by the adiabatic CFD study; the solid thermal runner is disabled.
-# Wall temperature evolves under conduction and optional radiation.
-# No adiabatic reference solution or endpoint-derived convection is required.
-
+# Separate Mechanical APDL solid solve. CFD stays steady and adiabatic.
 mapdl_version: 251
 processors: 4
-
-boundary_csv: null
 mesh_size_m: null
-initial_temperature_k: null
-
-include_radiation: true
-emissivity: null
-radiation_temperature_k: null
-
+initial_temperature_k: 300.0
+include_radiation: false
+emissivity: 0.9
+radiation_temperature_k: 226.5
 loading:
-  mode: fixed_heat_flux
-
+  mode: convection
+  # REQUIRED. Supply a justified coefficient; no value is inferred from q=0 CFD.
+  heat_transfer_coefficient_w_m2k: null
 material:
   name: Tungsten
+  # Constant-property approximation: verify values for the relevant temperature range.
   conductivity_w_mk: 170.0
   density_kg_m3: 19250.0
   specific_heat_j_kgk: 130.0
-
 transient:
-  duration_s: 400.0
-  initial_time_step_s: null
-  min_time_step_s: null
-  max_time_step_s: null
-
+  duration_s: 200.0
+  initial_time_step_s: 2.0
+  min_time_step_s: 0.2
+  max_time_step_s: 10.0
 visualization:
   enabled: true
   save_final_temperature_image: true
-  save_heat_flux_image: true
+  save_heat_flux_image: false
   save_temperature_history_image: true
-  make_gif: true
-  save_frame_pngs: false
+  make_gif: false
   max_animation_frames: 60
-  fps: 8
   dpi: 160
-
-# No service-temperature limit is assumed. Use a justified material/TPS limit.
 design_limits:
   max_temperature_k: null

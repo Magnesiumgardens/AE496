@@ -54,10 +54,9 @@ def export_temperatures(solver, cfg, wall_zones):
         raise ValueError("Select only the named body-wall zones")
     settings = cfg.get("temperature_export", {})
     field = settings.get("static_temperature_field", "temperature")
-    flux_field = settings.get("heat_flux_field", "heat-flux")
     data = solver.fields.field_data
     available = data.scalar_fields.allowed_values()
-    for required in (field, flux_field):
+    for required in (field,):
         if required not in available:
             raise ValueError(f"Field {required!r} unavailable. Run study.py export --inspect-fields.")
     geometry = data.get_field_data(SurfaceFieldDataRequest(surfaces=wall_zones,
@@ -66,18 +65,23 @@ def export_temperatures(solver, cfg, wall_zones):
     def scalar(boundary, name):
         return data.get_field_data(ScalarFieldDataRequest(
             surfaces=wall_zones, field_name=name, node_value=False, boundary_value=boundary))
-    wall, fluid, flux = scalar(True, field), scalar(False, field), scalar(True, flux_field)
+    wall, fluid = scalar(True, field), scalar(False, field)
+    nodal = data.get_field_data(ScalarFieldDataRequest(
+        surfaces=wall_zones, field_name=field, node_value=True, boundary_value=True))
     records = []
     for zone in wall_zones:
         surface = geometry[zone]
         vertices = np.asarray(surface.vertices, dtype=float)
         centers = np.asarray(surface.face_centroids, dtype=float)
         faces = unpack_faces(surface.connectivity)
-        arrays = [np.asarray(value[zone], dtype=float).reshape(-1) for value in (wall, fluid, flux)]
+        arrays = [np.asarray(value[zone], dtype=float).reshape(-1) for value in (wall, fluid)]
+        node_t = np.asarray(nodal[zone], dtype=float).reshape(-1)
+        if len(node_t) != len(vertices) or not np.isfinite(node_t).all() or np.any(node_t <= 0):
+            raise ValueError(f"Invalid wall-node temperature values on {zone}")
         if any(len(value) != len(faces) for value in [centers, *arrays]):
             raise ValueError(f"Temperature/geometry face counts differ on {zone}")
         if not all(np.isfinite(value).all() for value in [vertices, centers, *arrays]):
-            raise ValueError("Nonfinite temperature, geometry or wall heat flux")
+            raise ValueError("Nonfinite temperature or geometry")
         if any(np.any(value <= 0) for value in arrays[:2]):
             raise ValueError("Static temperatures must be positive kelvin")
         for index, face in enumerate(faces):
@@ -89,12 +93,8 @@ def export_temperatures(solver, cfg, wall_zones):
             records.append(dict(start=start, end=end, zone_name=zone, face_index=index,
                 center=centers[index], wall_temperature_K=float(arrays[0][index]),
                 near_wall_fluid_temperature_K=float(arrays[1][index]),
-                wall_heat_flux_fluent_W_m2=float(arrays[2][index])))
+                start_temperature_K=float(node_t[face[0]]), end_temperature_K=float(node_t[face[1]])))
     records = order_segments(records, float(settings.get("topology_tolerance_m", 1e-9)))
-    maximum_flux = max(abs(row["wall_heat_flux_fluent_W_m2"]) for row in records)
-    tolerance = float(settings.get("zero_flux_tolerance_W_m2", 1.0))
-    if not np.isfinite(tolerance) or tolerance <= 0 or maximum_flux > tolerance:
-        raise ValueError(f"Zero-heat-transfer check failed: max |q|={maximum_flux:g} W/m²; tolerance={tolerance:g}")
     rows, distance = [], 0.0
     for index, record in enumerate(records):
         length = float(np.linalg.norm(record["end"] - record["start"]))
@@ -102,8 +102,7 @@ def export_temperatures(solver, cfg, wall_zones):
         rows.append(dict(surface_order_index=index, zone_name=record["zone_name"], face_index=record["face_index"],
             x_m=float(x), y_m=float(y), z_m=float(z), s_m=distance + length / 2,
             segment_length_m=length, wall_temperature_K=record["wall_temperature_K"],
-            near_wall_fluid_temperature_K=record["near_wall_fluid_temperature_K"],
-            wall_heat_flux_fluent_W_m2=record["wall_heat_flux_fluent_W_m2"]))
+            near_wall_fluid_temperature_K=record["near_wall_fluid_temperature_K"]))
         distance += length
     csv_path, summary_path = temperature_paths(cfg)
     def stats(column):
@@ -116,13 +115,28 @@ def export_temperatures(solver, cfg, wall_zones):
         conditions=temperature_conditions(cfg),
         face_count=len(rows), body_wall_zones=list(wall_zones), static_temperature_field=field,
         wall_temperature=stats("wall_temperature_K"), near_wall_fluid_temperature=stats("near_wall_fluid_temperature_K"),
-        maximum_absolute_wall_heat_flux_W_m2=maximum_flux, zero_flux_tolerance_W_m2=tolerance,
         sampling=dict(wall="node_value=False, boundary_value=True",
                       fluid_side="node_value=False, boundary_value=False",
                       coordinates="Wall-face centroids; not fluid-cell centers or a specified offset distance"),
         limitations=["Fluid-side surface values depend on Fluent's boundary-value support and the near-wall mesh.",
                      "Wall values are adiabatic recovery temperatures, not transient solid temperatures."])
     atomic_csv(csv_path, rows)
+    # Follow connectivity and keep actual CFD vertices, not face centroids, for
+    # reconstructing the solid and mapping the convection recovery temperature.
+    current = min((p for r in records for p in (r["start"], r["end"])), key=lambda p: tuple(p[:2]))
+    node_rows = []
+    for index, record in enumerate(records):
+        forward = np.linalg.norm(current - record["start"]) <= float(settings.get("topology_tolerance_m", 1e-9))
+        point = record["start"] if forward else record["end"]
+        temperature = record["start_temperature_K"] if forward else record["end_temperature_K"]
+        node_rows.append(dict(surface_order_index=index, x_m=float(point[0]), y_m=float(point[1]),
+                              z_m=float(point[2]), recovery_temperature_K=temperature))
+        current = record["end"] if forward else record["start"]
+    node_path = csv_path.parent / "wall_temperature_nodes.csv"
+    atomic_csv(node_path, node_rows)
+    from .utils import file_sha256
+    summary["wall_nodes"] = dict(status="complete", csv=str(node_path), point_count=len(node_rows),
+                                  csv_sha256=file_sha256(node_path), sampling="Fluent boundary nodal temperature")
     if settings.get("export_fluid_nodes", True):
         try:
             interiors = solver.settings.setup.boundary_conditions.interior.get_object_names()

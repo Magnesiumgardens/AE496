@@ -47,13 +47,24 @@ def update_project(root, source, revision=None):
                 payload[str(state_path.relative_to(root))] = (json.dumps(adiabatic_state(state), indent=2) + "\n").encode()
     batch_path = root / "batch.yaml"
     batch = yaml.safe_load(batch_path.read_bytes()) if batch_path.is_file() else yaml.safe_load(git(source, "show", f"{revision}:batch.yaml"))
-    batch.pop("run_thermal", None);batch.pop("thermal_config", None);batch.pop("run_adiabatic_reference", None)
-    if batch.get("stop_after") in ("thermal", "thermal_export"):
+    batch.pop("run_adiabatic_reference", None)
+    if batch.get("stop_after") == "thermal_export":
         batch["stop_after"] = "aero"
     timeouts = batch.get("timeouts", {})
-    timeouts.pop("thermal", None)
     if "thermal_export" in timeouts:timeouts["temperature_export"] = timeouts.pop("thermal_export")
     payload["batch.yaml"] = yaml.safe_dump(batch, sort_keys=False).encode()
+    thermal_path = root / "thermal_analysis.yaml"
+    if thermal_path.is_file():
+        previous = yaml.safe_load(thermal_path.read_bytes()) or {}
+        if (previous.get("loading", {}) or {}).get("mode") == "convection":
+            # A user's h, exposure duration and material values are inputs, not code.
+            payload.pop("thermal_analysis.yaml", None)
+        else:
+            new_thermal = yaml.safe_load(payload["thermal_analysis.yaml"])
+            # Preserve material choices while replacing the obsolete load model.
+            for key in ("material", "mesh_size_m", "initial_temperature_k", "mapdl_version", "processors"):
+                if previous.get(key) is not None:new_thermal[key] = previous[key]
+            payload["thermal_analysis.yaml"] = yaml.safe_dump(new_thermal, sort_keys=False).encode()
     originals = {}
     for name in payload:
         path = root / name

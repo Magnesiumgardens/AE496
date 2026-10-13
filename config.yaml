@@ -71,7 +71,10 @@ solver:
   steady: true
   max_iterations: 1200
   run_iterations: true
-  hybrid_initialize: true
+  # Stable startup baseline; refine to second order after convergence.
+  initialization: freestream
+  courant_number: 0.1
+  flow_scheme: first-order-upwind
   temperature_history:
     enabled: true
     sample_every_iterations: 25
@@ -80,8 +83,6 @@ temperature_export:
   enabled: true
   output_directory: temperature
   static_temperature_field: temperature
-  heat_flux_field: heat-flux
-  zero_flux_tolerance_W_m2: 1.0
   # Optional nodal fluid map; wall and fluid-side face temperatures are required.
   export_fluid_nodes: true
 

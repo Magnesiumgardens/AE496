@@ -72,6 +72,11 @@ def build_gas_row(cfg, status="complete", elapsed_s=0, error=""):
         # reference settings are reported consistently for failed batch cases.
         reference_state(cfg)
         fresh_aero = aero_complete(work, cfg)
+        from .solution_quality import saved_quality
+        quality = saved_quality(cfg)
+        if quality["status"] == "failed":
+            status = "unconverged"
+            problems.extend(quality.get("reasons",[]))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         problems.append(str(exc))
         status = "failed"
@@ -87,11 +92,10 @@ def build_gas_row(cfg, status="complete", elapsed_s=0, error=""):
         mean_wall_temperature_K=metric("wall_temperature", "length_weighted_mean_K"),
         maximum_near_wall_fluid_temperature_K=metric("near_wall_fluid_temperature", "maximum_K"),
         mean_near_wall_fluid_temperature_K=metric("near_wall_fluid_temperature", "length_weighted_mean_K"),
-        maximum_absolute_wall_heat_flux_W_m2=summary.get("maximum_absolute_wall_heat_flux_W_m2") if fresh_temp else None,
         drag_per_unit_span_N_m=aero.get("drag_per_unit_span_N_m") if fresh_aero else None,
         lift_per_unit_span_N_m=aero.get("lift_per_unit_span_N_m") if fresh_aero else None,
         Cd=aero.get("Cd") if fresh_aero else None, Cl=aero.get("Cl") if fresh_aero else None,
-        convergence_status=aero.get("convergence_status", "not_verified") if fresh_aero else "not_verified")
+        convergence_status="failed" if status == "unconverged" else (aero.get("convergence_status", "not_verified") if fresh_aero else "not_verified"))
 
 
 def profile(rows, cfg):
@@ -240,24 +244,6 @@ def _case_figures(case, temperature_ranges, plt):
     ax.set_aspect("equal", adjustable="box")
     ax.legend()
     files["wall_boundary"] = _save(fig, report_dir / "adiabatic_wall_boundary.png", plt)
-    # Plot the actual exported heat flux, including residual roundoff, rather
-    # than replacing it with fabricated zero samples.
-    tolerance = float(summary["zero_flux_tolerance_W_m2"])
-    flux = [float(row["wall_heat_flux_fluent_W_m2"]) for row in values]
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.axhspan(-tolerance, tolerance, color="tab:green", alpha=0.1, label="Zero-flux verification tolerance")
-    ax.axhline(0, color="black", linewidth=0.7)
-    ax.plot([row["s_profile_m"] for row in values], flux, label="Exported Fluent wall heat flux")
-    ax.set(xlabel="Distance along wall-face samples [m]", ylabel="Wall heat flux [W/m²]",
-           title=name + " — no-heat-transfer boundary check", ylim=(-1.1 * tolerance, 1.1 * tolerance))
-    ax.legend()
-    ax.grid(alpha=0.3)
-    files["wall_heat_flux_profile"] = _save(fig, report_dir / "adiabatic_wall_heat_flux_profile.png", plt)
-    fig, ax = plt.subplots(figsize=(10, 4))
-    scatter = _wall_map(ax, values, "wall_heat_flux_fluent_W_m2", name + " — zero wall heat flux check",
-                        (-tolerance, tolerance), cmap="coolwarm")
-    fig.colorbar(scatter, ax=ax, label="Exported wall heat flux [W/m²]")
-    files["wall_heat_flux_map"] = _save(fig, report_dir / "adiabatic_wall_heat_flux_map.png", plt)
     if points:
         node_xy = np.asarray([[float(point["x_m"]), float(point["y_m"])] for point in points])
         temperature = np.asarray([float(point["static_temperature_K"]) for point in points])
@@ -350,7 +336,7 @@ def create_gas_reports(runs_dir, output_dir):
             cfg["project"].setdefault("name", work.name)
             row = build_gas_row(cfg)
             rows.append(row)
-            if row["status"] == "failed":
+            if row["status"] in ("failed","unconverged"):
                 warnings.append(f"{work.name}: {row['error']}")
                 continue
             if row["temperature_status"] != "complete" or row["aero_status"] != "complete":

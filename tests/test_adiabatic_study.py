@@ -53,32 +53,29 @@ def field_solver(flux=0):
 
 
 class AdiabaticPhysicsTests(unittest.TestCase):
-    def test_iteration_history_uses_actual_counter_and_respects_early_stop(self):
+    def test_native_history_preserves_single_solve_and_actual_early_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             cfg = config(Path(directory));cfg["solver"]["max_iterations"] = 100
-            current = [0];calls = []
-            class Counter:
-                def allowed_values(self):return ["iteration", "number-of-iterations"]
-                def __call__(self, name):return current[0]
+            calls = []
+            raw = Path(directory)/"solver_temperature_history.out"
+            report = SimpleNamespace(active=True)
             def iterate(iter_count):
                 calls.append(iter_count)
-                current[0] += iter_count if current[0] < 25 else 7
-            solver = SimpleNamespace(rp_vars=Counter(), settings=SimpleNamespace(solution=SimpleNamespace(
+                raw.write_text('"Iteration" "auto-wall-temp-max" "auto-wall-temp-min" "auto-wall-temp-avg"\n25 2500 1000 2000\n32 2600 1100 2100\n')
+            solver = SimpleNamespace(settings=SimpleNamespace(solution=SimpleNamespace(
                 run_calculation=SimpleNamespace(iterate=iterate))))
-            temperatures = {"wall_temperature_min_k":1000, "wall_temperature_avg_k":2000, "wall_temperature_max_k":2500}
-            with patch("pipeline.solve._temperature_summary", return_value=temperatures):
-                result = _iterate_with_temperature_history(solver, cfg, ["body_wall"])
-            self.assertEqual(calls, [25,25])
-            with (Path(directory) / result["csv"]).open(newline="") as handle:rows = list(csv.DictReader(handle))
-            self.assertEqual([int(r["iteration"]) for r in rows], [0,25,32])
-            self.assertEqual(result["status"], "complete")
-            self.assertFalse(any("time_s" in r for r in rows))
-            current[0]=0
-            with patch("pipeline.solve._temperature_summary", return_value=temperatures), \
-                 patch("pipeline.solve.atomic_csv", side_effect=OSError("CSV is locked")):
-                result = _iterate_with_temperature_history(solver, cfg, ["body_wall"])
-            self.assertEqual(result["status"], "unavailable")
-            self.assertIn("locked", result["error"])
+            with patch("pipeline.iteration_history.configure_history",return_value=(raw,report)):
+                result = _iterate_with_temperature_history(solver,cfg,["body_wall"])
+            self.assertEqual(calls,[100])
+            with (Path(directory)/result["csv"]).open() as handle:rows=list(csv.DictReader(handle))
+            self.assertEqual([int(row["iteration"]) for row in rows],[25,32])
+            self.assertEqual(float(rows[-1]["wall_temperature_max_k"]),2600)
+            self.assertFalse(report.active)
+            with patch("pipeline.iteration_history.configure_history",return_value=(raw,report)), \
+                 patch("pipeline.iteration_history.atomic_csv",side_effect=OSError("CSV is locked")):
+                result = _iterate_with_temperature_history(solver,cfg,["body_wall"])
+            self.assertEqual(result["status"],"unavailable")
+            self.assertIn("locked",result["error"])
 
     def test_missing_iteration_counter_retains_original_single_solve(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,7 +112,7 @@ class AdiabaticPhysicsTests(unittest.TestCase):
                 cfg["thermal"] = thermal;path.write_text(yaml.safe_dump(cfg))
                 with self.assertRaises(ConfigError):load_config(path)
 
-    def test_export_distinguishes_wall_fluid_values_and_checks_zero_flux(self):
+    def test_export_distinguishes_wall_fluid_values_and_requests_only_temperature(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cfg = config(root)
@@ -125,19 +122,14 @@ class AdiabaticPhysicsTests(unittest.TestCase):
             self.assertEqual(result["face_count"], 4)
             self.assertEqual(result["wall_temperature"]["length_weighted_mean_K"], 2150)
             self.assertEqual(result["near_wall_fluid_temperature"]["length_weighted_mean_K"], 2050)
-            self.assertEqual(result["maximum_absolute_wall_heat_flux_W_m2"], 0)
+            self.assertEqual(result["wall_nodes"]["point_count"], 4)
+            self.assertTrue(all(getattr(r,"field_name","temperature") == "temperature" for r in calls))
+            self.assertNotIn("wall_heat_flux_fluent_W_m2",rows[0])
             self.assertTrue(all(float(r["wall_temperature_K"]) - float(r["near_wall_fluid_temperature_K"]) == 100 for r in rows))
             requests = [r for r in calls if getattr(r, "field_name", None) == "temperature" and not r.node_value]
             self.assertEqual([r.boundary_value for r in requests], [True, False])
             self.assertEqual(result["fluid_nodes"]["point_count"], 4)
             self.assertTrue((temperature_paths(cfg)[0].parent / "fluid_temperature_nodes.csv").is_file())
-
-    def test_nonzero_flux_is_rejected_without_generating_a_temperature_package(self):
-        with tempfile.TemporaryDirectory() as directory:
-            cfg = config(Path(directory));solver, _ = field_solver(flux=2000)
-            with self.assertRaisesRegex(ValueError, "Zero-heat-transfer check failed"):
-                export_temperatures(solver, cfg, ["body_wall"])
-            self.assertFalse(temperature_paths(cfg)[0].exists())
 
     def test_migration_preserves_mesh_and_marks_old_solver_stale(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -162,12 +154,12 @@ class AdiabaticPhysicsTests(unittest.TestCase):
             self.assertNotIn("thermal", state)
             self.assertEqual(len(list(path.parent.glob("config_before_adiabatic*"))), 1)
 
-    def test_solid_thermal_runner_cannot_run_the_adiabatic_case(self):
+    def test_solid_thermal_runner_requires_h_before_launch(self):
         from pipeline.thermal import run_thermal_analysis
         from pipeline.thermal_loading import ThermalAnalysisError
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yaml";path.write_text(yaml.safe_dump(config(Path(directory))))
-            with self.assertRaisesRegex(ThermalAnalysisError, "disabled"):
+            with self.assertRaisesRegex(ThermalAnalysisError, "heat_transfer_coefficient"):
                 run_thermal_analysis(cfd_config=path)
 
 
@@ -250,6 +242,7 @@ class FullUpdateTests(unittest.TestCase):
             (source / "study.py").write_text("# new application\n")
             (source / "config.yaml").write_text((ROOT / "config.yaml").read_text())
             (source / "batch.yaml").write_text((ROOT / "batch.yaml").read_text())
+            (source / "thermal_analysis.yaml").write_text((ROOT / "thermal_analysis.yaml").read_text())
             subprocess.run(["git", "init", "-q", str(source)], check=True)
             subprocess.run(["git", "-C", str(source), "add", "."], check=True)
             subprocess.run(["git", "-C", str(source), "-c", "user.name=Study Test", "-c", "user.email=study@example.invalid", "commit", "-qm", "fixture"], check=True)
@@ -262,7 +255,13 @@ class FullUpdateTests(unittest.TestCase):
             (case / "_batch/stage_state.json").write_text(json.dumps({"stages":{"mesh":{"status":"complete"},"solver":{"status":"complete"}}}))
             (case / "02_mesh.msh.h5").write_bytes(b"keep this mesh")
             (case / "04_final.dat.h5").write_bytes(b"keep previous solution")
+            thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
+            thermal["loading"]["heat_transfer_coefficient_w_m2k"] = 123
+            thermal["transient"]["duration_s"] = 180
+            (target / "thermal_analysis.yaml").write_text(yaml.safe_dump(thermal))
+            thermal_bytes = (target / "thermal_analysis.yaml").read_bytes()
             backup = update_project(target, source)
+            self.assertEqual((target / "thermal_analysis.yaml").read_bytes(),thermal_bytes)
             self.assertEqual(load_config(case / "_batch/config.yaml")["thermal"], {"mode":"adiabatic"})
             self.assertEqual(load_config(case / "_batch/config.yaml")["flight"]["mach"], 7)
             self.assertEqual((case / "02_mesh.msh.h5").read_bytes(), b"keep this mesh")

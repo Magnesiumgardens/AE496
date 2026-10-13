@@ -11,7 +11,11 @@ def main():
     selection.add_argument("--geometry", help="Create a case config from one CAD file and the base template")
     run.add_argument("--base-config", default="config.yaml")
     run.add_argument("--runs-dir", default="runs")
-    run.add_argument("--stop-after", choices=("mesh", "solver", "temperature_export", "aero"), default="aero")
+    run.add_argument("--stop-after", choices=("mesh", "solver", "temperature_export", "aero", "thermal"), default="aero")
+    run.add_argument("--thermal-config", default="thermal_analysis.yaml")
+    thermal = commands.add_parser("thermal", help="Run separate Mechanical APDL convection/conduction using exported temperatures")
+    thermal.add_argument("--config", required=True)
+    thermal.add_argument("--thermal-config", default="thermal_analysis.yaml")
     run.add_argument("--no-resume", action="store_true")
     batch = commands.add_parser("batch", help="Run all configured nose geometries sequentially")
     batch.add_argument("--batch-config", default="batch.yaml")
@@ -36,6 +40,15 @@ def main():
     if args.command == "batch":
         from pipeline.study import main as batch_main
         return batch_main(args.batch_config)
+    if args.command == "thermal":
+        from pipeline.thermal import run_thermal_analysis
+        print(run_thermal_analysis(cfd_config=args.config, thermal_config=args.thermal_config))
+        from compare_nose_trade import compare
+        from pipeline.config import load_config
+        from pathlib import Path
+        work = Path(load_config(args.config)["project"]["work_dir"])
+        compare(work.parent, work.parent / "comparison")
+        return 0
     if args.command == "run":
         from pipeline.study import run_case
         config_path = args.config
@@ -50,14 +63,14 @@ def main():
             directory = Path(args.runs_dir).resolve() / name
             config_path = directory / "_batch" / "config.yaml"
             write_case_config(load_yaml(args.base_config), geometry, name, directory, config_path)
-        result = run_case(config_path, resume=not args.no_resume, stop_after=args.stop_after)
-        if result.get("status") == "complete" and args.stop_after == "aero":
-            from pipeline.gas_reporting import create_gas_reports
+        result = run_case(config_path, args.thermal_config, resume=not args.no_resume, stop_after=args.stop_after)
+        if result.get("status") == "complete" and args.stop_after in ("aero", "thermal"):
             from pipeline.config import load_config
             from pathlib import Path
             cfg = load_config(config_path)
             work = Path(cfg["project"]["work_dir"])
-            create_gas_reports(work.parent, work.parent / "comparison")
+            from compare_nose_trade import compare
+            compare(work.parent, work.parent / "comparison")
         print(result)
         return 0 if result.get("status") == "complete" else 2
     if args.command == "report":

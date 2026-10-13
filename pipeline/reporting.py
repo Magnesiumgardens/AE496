@@ -73,7 +73,7 @@ def build_result_row(geometry_file, case_name, case_dir, status, elapsed_s, erro
     summary = read_json(case_dir / "thermal_analysis/thermal_summary.json")
     row["thermal_loading_mode"] = summary.get("loading_mode", "unknown")
     row["thermal_comparison_signature"] = json.dumps({
-        key: summary.get(key) for key in ("material", "analysis", "loading_mode")}, sort_keys=True)
+        key: summary.get(key) for key in ("material", "analysis", "loading_mode", "settings")}, sort_keys=True)
     row.update({key: summary.get("screening_metrics", {}).get(key, "") for key in THERMAL_METRIC_FIELDS})
     flux, temp = summary.get("applied_heat_flux_W_m2", {}), summary.get("final_temperature", {})
     mesh = summary.get("thermal_mesh", {})
@@ -236,7 +236,7 @@ def _wall_plots(history, profiles, directory, comparison=True, colors=None):
     return created
 
 
-def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None):
+def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, case_names=None):
     """Rebuild every CSV/plot using saved data, with no CFD or thermal solve."""
     from .trade_study import create_trade_outputs
     runs_dir, output_dir = Path(runs_dir), Path(output_dir)
@@ -254,6 +254,7 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None):
     colors = {name: plt.get_cmap("tab10")(index % 10)
               for index, name in enumerate(dict.fromkeys(design_order))}
     for directory in sorted(runs_dir.iterdir()) if runs_dir.is_dir() else []:
+        if case_names is not None and directory.name not in case_names:continue
         raw = directory / "thermal_analysis/wall_temperature_history.csv"
         if not directory.is_dir() or not raw.is_file():
             continue
@@ -280,7 +281,7 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None):
                                     for s in snapshots]
                     summary = read_json(directory / "thermal_analysis/thermal_summary.json")
                     create_thermal_visualizations(directory / "thermal_analysis", arrays["boundary_xy_m"],
-                        arrays["boundary_flux_W_m2"], arrays["coordinates_m"], node_history, snapshots,
+                        arrays["boundary_flux_W_m2"] if "boundary_flux_W_m2" in arrays else np.zeros(len(arrays["boundary_xy_m"])), arrays["coordinates_m"], node_history, snapshots,
                         summary.get("visualization_settings", {"make_gif": False}))
         except (ValueError, KeyError, TypeError) as exc:
             warnings.append(f"{directory.name}: {exc}")

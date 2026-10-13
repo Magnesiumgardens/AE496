@@ -31,6 +31,9 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         raise ValueError("run_iterations=false cannot establish a solved CFD result")
     if aero:
         reference_state(cfg)
+    if not inspect:
+        from .solution_quality import require_usable_solution
+        require_usable_solution(cfg)
     solver = launch_solver(cfg, "export_logs")
     try:
         solver.settings.file.read_case_data(file_name=str(paths["final_case"]))
@@ -47,7 +50,7 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                  if z == base or z.startswith(base + ".")]
         result = {}
         if thermal:
-            print("[export] Checking zero heat flux and saving adiabatic temperatures...", flush=True)
+            print("[export] Saving adiabatic gas/recovery temperatures...", flush=True)
             result["temperatures"] = export_temperatures(solver, cfg, walls)
             result["temperatures"]["source_sha256"] = {
                 key: file_sha256(paths[key]) for key in ("final_case", "final_data")}

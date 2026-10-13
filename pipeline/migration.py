@@ -14,8 +14,10 @@ def adiabatic_config(cfg):
     cfg.pop("thermal_export", None)
     export = cfg.setdefault("temperature_export", {})
     for key, value in dict(enabled=True, output_directory="temperature", static_temperature_field="temperature",
-                           heat_flux_field="heat-flux", zero_flux_tolerance_W_m2=1.0, export_fluid_nodes=True).items():
+                           export_fluid_nodes=True).items():
         export.setdefault(key, value)
+    export.pop("heat_flux_field", None)
+    export.pop("zero_flux_tolerance_W_m2", None)
     export["enabled"] = True
     outputs = cfg.setdefault("outputs", {})
     outputs.pop("export_custom_heat_flux", None)
@@ -23,6 +25,11 @@ def adiabatic_config(cfg):
     outputs["write_case_data"] = True
     cfg.setdefault("solver", {}).setdefault("temperature_history", {
         "enabled": True, "sample_every_iterations": 25})
+    solver = cfg["solver"]
+    solver.setdefault("initialization","freestream")
+    solver.setdefault("courant_number",.1)
+    solver.setdefault("flow_scheme","first-order-upwind")
+    solver.pop("hybrid_initialize",None)
     return cfg
 
 

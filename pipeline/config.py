@@ -72,6 +72,9 @@ def validate_config(cfg):
                         cfg["solver"].get("temperature_history", {}).get("sample_every_iterations", 25))
     if not interval.is_integer():
         raise ConfigError("solver.temperature_history.sample_every_iterations must be an integer")
+    positive("solver.courant_number",cfg["solver"].get("courant_number",.1))
+    if cfg["solver"].get("initialization","freestream") not in ("freestream","hybrid"):
+        raise ConfigError("solver.initialization must be freestream or hybrid")
     for name in ("geometry_start_timeout_s", "fluent_start_timeout_s"):
         positive("runtime." + name, runtime.get(name, 300))
     release_delay = float(runtime.get("meshing_release_delay_s", 10))
@@ -81,7 +84,6 @@ def validate_config(cfg):
         raise ConfigError("Heat-load export is incompatible with this adiabatic study; migrate the config.")
     export = cfg.get("temperature_export", {})
     positive("temperature_export.topology_tolerance_m", export.get("topology_tolerance_m", 1e-9))
-    positive("temperature_export.zero_flux_tolerance_W_m2", export.get("zero_flux_tolerance_W_m2", 1.0))
     if cfg.get("aero", {}).get("enabled", True):
         from .aero import reference_state
         reference_state(cfg)

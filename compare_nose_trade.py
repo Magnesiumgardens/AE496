@@ -10,7 +10,10 @@ from pipeline.trade_study import aero_complete
 def compare(runs_dir, output_dir, reference_dir=None):
     if reference_dir is None:
         from pipeline.gas_reporting import create_gas_reports
-        return create_gas_reports(runs_dir, output_dir)
+        gas = create_gas_reports(runs_dir, output_dir)
+        from pipeline.mechanical_reporting import create_mechanical_reports
+        create_mechanical_reports(runs_dir, Path(output_dir) / "solid")
+        return gas
     runs_dir, output_dir = Path(runs_dir), Path(output_dir)
     rows = []
     for directory in sorted(runs_dir.iterdir()) if runs_dir.is_dir() else []:
