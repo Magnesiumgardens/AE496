@@ -1,0 +1,109 @@
+# Hypersonic 2-D external-flow PDR screening pipeline
+# ANSYS 2025 R1 / PyFluent workflow used by this project.
+#
+# IMPORTANT MODEL INTENT
+# - The primary CFD remains a 300 K cold-wall case so Fluent produces q''(s).
+# - run_adiabatic_reference.py then reuses the converged case with q''=0 to
+#   obtain T_aw(s).  The thermal model combines both endpoint CFD solutions.
+# - Geometry input is one 2-D FLUID SURFACE in the global XY plane:
+#     outer far-field rectangle MINUS the vehicle (vehicle is an inner hole).
+
+project:
+  name: nose_M8
+  work_dir: ./runs/nose_M8
+
+runtime:
+  processors: 4
+  fluent_gui: true
+  geometry_launch_mode: spaceclaim
+  fluent_start_timeout_s: 300
+
+geometry:
+  input_file: "C:/Users/mattk/school/AE 496/arbiter/raw geometries/dimensional_geometry.x_t"
+  input_kind: prepared_fluid_surface
+  auto_label: true
+  body_wall_name: body_wall
+  farfield_name: farfield
+  outer_edge_tolerance_fraction: 1.0e-7
+
+mesh:
+  length_unit: m
+  global_min_size: 0.00020
+  global_max_size: 0.020
+  curvature_normal_angle_deg: 18.0
+
+  # Strong local curvature refinement remains active for heat-transfer work.
+  body_min_size: 0.00015
+  body_max_size: 0.0010
+  body_curvature_normal_angle_deg: 8.0
+
+  # Boundary layers matter for viscous drag and wall heating.
+  # Retry without inflation only after an explicit boundary-layer stage marker.
+  # Cases with different boundary-layer settings are not ranked together.
+  boundary_layer:
+    enabled: true
+    number_of_layers: 20
+    first_layer_height: 1.0e-5
+    growth_rate: 1.15
+    offset_method: last-ratio
+
+flight:
+  mach: 8.0
+  static_pressure_pa: 1090.0
+  static_temperature_k: 226.5
+  flow_direction: [1.0, 0.0]
+
+physics:
+  viscous_model: laminar
+  operating_pressure_pa: 0.0
+  air:
+    density_model: ideal-gas
+    viscosity_model: sutherland
+    sutherland_reference_viscosity: 1.716e-5
+    sutherland_reference_temperature_k: 273.11
+    sutherland_effective_temperature_k: 110.56
+
+thermal:
+  # Keep this as fixed_temperature.  It is the cold-wall endpoint used to
+  # calculate aerodynamic heat flux.  Adiabatic is run separately afterward.
+  mode: fixed_temperature
+  wall_temperature_k: 300.0
+
+  # Retained from the current project assumption.  Replace with measured/
+  # selected surface emissivity when the TPS surface is finalized.
+  emissivity: 0.90
+
+  # More defensible PDR ambient-radiation reference than a 3 K deep-space sink
+  # for an atmospheric Mach-8 glide segment.  Its effect is small at very high
+  # wall temperature because radiation scales with T_w^4.
+  external_radiation_temperature_k: 226.5
+
+adiabatic_reference:
+  # Starts from the converged cold-wall solution and does NOT reinitialize.
+  max_iterations: 600
+
+solver:
+  density_solver: density-based-implicit
+  steady: true
+  max_iterations: 1200
+  run_iterations: true
+  hybrid_initialize: true
+
+thermal_export:
+  output_directory: thermal_bc
+
+outputs:
+  write_case_data: true
+  export_custom_heat_flux: true
+  compute_temperature_summary: true
+
+# Planar sectional screening, not an axisymmetric or whole-vehicle model.
+aero:
+  enabled: true
+  model_kind: planar_section
+  # A_ref / span. Select ONE justified common width for all nose candidates.
+  # null exports N/m forces but deliberately leaves Cd and Cl undefined.
+  reference_area_per_unit_span_m: null
+  reference_length_m: null
+  ratio_of_specific_heats: 1.4
+  gas_constant_j_kgk: 287.05

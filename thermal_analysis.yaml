@@ -1,0 +1,59 @@
+# 2-D transient tungsten thermal analysis.
+#
+# loading.mode=convective_from_cfd requires TWO CFD endpoints:
+#   300 K cold-wall CFD -> q''_cold(s)
+#   adiabatic CFD       -> T_aw(s)
+# and derives:
+#   h(s) = q''_cold(s) / [T_aw(s) - 300 K]
+# MAPDL then applies q''_conv(s,t)=h(s)[T_aw(s)-T_w(s,t)] plus radiation.
+# This is more realistic than holding the 300 K cold-wall heat flux constant
+# for the entire transient, while remaining much cheaper than full CFD/FEA
+# co-simulation.
+
+mapdl_version: 251
+processors: 4
+
+boundary_csv: null
+mesh_size_m: null
+initial_temperature_k: null
+
+include_radiation: true
+emissivity: null
+radiation_temperature_k: null
+
+loading:
+  # convective_from_cfd -> require both CFD endpoints; fail rather than silently
+  #                        downgrade an upgraded PDR result.
+  # auto -> endpoint-derived convection when possible, fixed-q fallback otherwise.
+  # fixed_heat_flux -> legacy 300 K cold-wall q'' held constant.
+  mode: convective_from_cfd
+  adiabatic_csv: null
+  min_delta_temperature_k: 25.0
+  max_film_coefficient_w_m2k: null
+
+material:
+  name: Tungsten
+  conductivity_w_mk: 170.0
+  density_kg_m3: 19250.0
+  specific_heat_j_kgk: 130.0
+
+transient:
+  duration_s: 400.0
+  initial_time_step_s: null
+  min_time_step_s: null
+  max_time_step_s: null
+
+visualization:
+  enabled: true
+  save_final_temperature_image: true
+  save_heat_flux_image: true
+  save_temperature_history_image: true
+  make_gif: true
+  save_frame_pngs: false
+  max_animation_frames: 60
+  fps: 8
+  dpi: 160
+
+# No service-temperature limit is assumed. Use a justified material/TPS limit.
+design_limits:
+  max_temperature_k: null
