@@ -72,7 +72,7 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
     for _, (name, rtype) in specs.items():
         try:
             if name in reports.get_object_names():
-                reports.delete(names=[name])
+                reports.delete(name_list=[name])
         except Exception:
             pass
 

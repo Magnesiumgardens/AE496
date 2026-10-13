@@ -68,8 +68,8 @@ class ExportTests(unittest.TestCase):
             self.assertFalse(request.node_value)
             return {"body_wall.1": np.array([-1, -2, -3, -4])}
         solver = SimpleNamespace(fields=SimpleNamespace(
-            field_info=SimpleNamespace(get_scalar_fields_info=lambda: {"heat-flux": {}}),
-            field_data=SimpleNamespace(get_field_data=read)))
+            field_data=SimpleNamespace(get_field_data=read,
+                scalar_fields=SimpleNamespace(allowed_values=lambda: ["heat-flux"]))))
         with tempfile.TemporaryDirectory() as directory:
             cfg = {"project": {"work_dir": directory}, "geometry": {},
                 "thermal": {"wall_temperature_k": 300},

@@ -145,7 +145,7 @@ class AeroTests(unittest.TestCase):
         self.assertEqual(report_scalar(({"drag": [7]}, {"drag": [1200]}), "drag"), 7)
         with self.assertRaises(ValueError):
             report_scalar(({}, {"drag": [1200]}), "drag")
-        for raw in ({"drag": [7, 8]}, {"drag": [float("nan")]}, {"drag": True}):
+        for raw in ({"drag": [7, 8, 9]}, {"drag": [float("nan")]}, {"drag": True}):
             with self.assertRaises(ValueError):
                 report_scalar(raw, "drag")
 

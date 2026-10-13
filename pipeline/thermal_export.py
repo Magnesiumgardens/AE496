@@ -77,7 +77,7 @@ def export_thermal_bc_package(solver, cfg, wall_zones):
     base = cfg["geometry"].get("body_wall_name", "body_wall")
     if not wall_zones or any(not (z == base or z.startswith(base + ".")) for z in wall_zones):
         raise ValueError("Export only named body-wall zones")
-    fields = solver.fields.field_info.get_scalar_fields_info()
+    fields = solver.fields.field_data.scalar_fields.allowed_values()
     if field_name not in fields:
         candidates = [name for name in fields if "flux" in name.casefold() or "heat" in name.casefold()]
         raise ValueError(f"Heat-flux field {field_name!r} unavailable. Inspect available fields: {candidates}")

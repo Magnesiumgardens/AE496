@@ -43,6 +43,18 @@ An existing case config can be used directly:
 The familiar older entry points remain thin compatibility wrappers, all using
 `--config` for case selection. They share the same implementation.
 
+Fluent 2025 R1's 2-D meshing workflow runs inside a **3-D meshing host** with
+Prime 2-D enabled; the resulting mesh and CFD solver remain planar 2-D. Saved
+force reports are reused during export. The adapters accept the 251 boundary
+value groups and report value/iteration records without mistaking iteration
+indices for physical values.
+
+For an existing installation with manually patched adapters,
+`scripts/update_adapters.py --revision <full-commit-sha>` installs the five
+consolidated adapter files from that immutable GitHub revision. It downloads
+and compiles all files first, saves the previous source under
+`logs/source_backups/`, and retains configurations and simulation outputs.
+
 ## Configuration and physics
 
 - `config.yaml`: common CFD/mesh template. The batch replaces `project.name`,

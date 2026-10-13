@@ -117,11 +117,11 @@ def build_mesh(cfg: dict, geometry_file: str | Path) -> Path:
     farfield_name = cfg["geometry"].get("farfield_name", "farfield")
     session = None
     stage = "launch"
-    print("[mesh] Launching 2-D double-precision Fluent Meshing...")
+    print("[mesh] Launching 3-D double-precision meshing host for the 2-D workflow...")
     try:
         session = pyfluent.launch_fluent(
             mode=pyfluent.FluentMode.MESHING,
-            dimension=pyfluent.Dimension.TWO,
+            dimension=pyfluent.Dimension.THREE,
             precision=pyfluent.Precision.DOUBLE,
             product_version=runtime.get("fluent_version", "25.1.0"),
             processor_count=int(runtime.get("processors", 4)),
@@ -129,7 +129,8 @@ def build_mesh(cfg: dict, geometry_file: str | Path) -> Path:
             cwd=str(log_dir),
             start_timeout=int(runtime.get("fluent_start_timeout_s", 300)),
         )
-        workflow = session.two_dimensional_meshing()
+        session.meshing.GlobalSettings.EnablePrime2dMeshing.set_state(True)
+        workflow = session.two_dimensional_meshing(legacy=True)
         stage = "cad_import"
         print(f"[mesh] Loading 2-D CAD: {geometry_file}")
         _run_task(workflow, ("load_cad_geometry_2d", "load_cad_geometry"), {
@@ -138,14 +139,16 @@ def build_mesh(cfg: dict, geometry_file: str | Path) -> Path:
         stage = "regions"
         print("[mesh] Updating fluid regions")
         regions = _workflow_task(workflow, "update_regions_2d", "update_regions")
-        region_names = regions.arguments.get_state().get("region_name_list", [])
-        if not region_names:
-            raise MeshPipelineError("Fluent exposed no fluid regions after importing the prepared surface.")
-        regions.arguments.update_dict({
-            "region_name_list": region_names, "region_type_list": ["fluid"] * len(region_names)
-        })
         if regions() is False:
             raise MeshPipelineError("Fluent reported failure while updating fluid regions.")
+        region_state = regions.arguments.get_state()
+        region_names = region_state.get("region_current_list") or region_state.get("region_name_list", [])
+        region_types = region_state.get("region_current_type_list") or region_state.get("region_type_list", [])
+        if not region_names or len(region_names) != len(region_types) or any(
+            str(kind).casefold() != "fluid" for kind in region_types
+        ):
+            raise MeshPipelineError(f"Expected fluid regions after update; received {region_state}")
+        print(f"[mesh] Confirmed {len(region_names)} fluid region(s)")
         stage = "boundaries"
         print("[mesh] Updating body and farfield boundaries")
         _run_task(workflow, ("update_boundaries_2d", "update_boundaries"), {

@@ -65,15 +65,20 @@ def reference_state(cfg):
 def report_scalar(raw, target):
     """Read one named report without mistaking iteration indices for forces.
 
-    PyFluent returns ({name: [value]}, {name: [iteration]}).
-    Only the value mapping is inspected. Unexpected layouts fail explicitly.
+    Fluent 251 returns named [value, iteration] records; newer clients can
+    separate values and iteration metadata. Never search metadata for a value.
     """
     values = raw[0] if isinstance(raw, (tuple, list)) else raw
     if not isinstance(values, dict) or target not in values:
         raise ValueError(f"No value returned for force report {target!r}")
     value = values[target]
-    if isinstance(value, (tuple, list)) and len(value) == 1:
-        value = value[0]
+    if isinstance(value, (tuple, list)):
+        if len(value) == 1:
+            value = value[0]
+        elif (len(value) == 2 and isinstance(value[1], Real)
+              and not isinstance(value[1], bool) and math.isfinite(value[1])
+              and float(value[1]).is_integer() and value[1] >= 0):
+            value = value[0]
     if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
         raise ValueError(f"Invalid or ambiguous force value for {target!r}: {value!r}")
     return float(value)
@@ -83,22 +88,40 @@ def _force_report(solver, kind, zones, direction):
     definitions = solver.settings.solution.report_definitions
     collection = getattr(definitions, kind)
     name = "nose-study-" + kind
-    if name in collection.get_object_names():
-        collection.delete(names=[name])
-    collection.create(name=name)
+    if name not in collection.get_object_names():
+        collection.create(name=name)
     report = collection[name]
-    report.report_type = kind
+    # Typed drag/lift collections determine report type. That child is inactive
+    # in 251. Reuse saved reports; no destructive delete/recreate is necessary.
     report.zones = zones
     report.force_vector = direction
     report.per_zone = False
     # Never accidentally interpret a default coefficient as a dimensional force.
     allowed = report.report_output_type.allowed_values()
-    force_type = next((v for v in allowed if str(v).casefold() == "force"), None)
+    force_type = next((v for v in allowed if str(v).casefold().replace(" ", "")
+                       in ("force", kind + "force")), None)
     if force_type is None:
         raise ValueError(f"Fluent {kind} report does not expose Force output: {allowed}")
     report.report_output_type = force_type
-    report.average_over = 1
+    averaging = getattr(report, "average_over", None)
+    if averaging is not None and (not hasattr(averaging, "is_active") or averaging.is_active()):
+        report.average_over = 1
     return name
+
+
+def setting_scalar(value):
+    """Read constant numerical boundary groups from the pinned 251 API."""
+    while isinstance(value, dict):
+        option = str(value.get("option", "value")).casefold()
+        if option not in ("value", "constant") or "value" not in value:
+            raise ValueError(f"Expected a constant numerical boundary setting: {value!r}")
+        value = value["value"]
+    if isinstance(value, bool):
+        raise ValueError("A boundary setting cannot be a boolean")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Boundary setting is not finite")
+    return number
 
 
 def validate_saved_conditions(solver, cfg):
@@ -112,22 +135,22 @@ def validate_saved_conditions(solver, cfg):
         raise ValueError("Saved case has no matching pressure-far-field boundaries")
 
     def check(name, actual, expected):
-        if not math.isclose(float(actual), float(expected), rel_tol=1e-6, abs_tol=1e-8):
+        if not math.isclose(setting_scalar(actual), setting_scalar(expected), rel_tol=1e-6, abs_tol=1e-8):
             raise ValueError(f"Saved case {name}={actual} differs from requested {expected}; rerun CFD")
 
     operating = setup.general.operating_conditions.operating_pressure.get_state()
     for zone in zones:
         far = farfields[zone]
         check("Mach", far.momentum.mach_number.get_state(), state["mach"])
-        check("static pressure", float(far.momentum.gauge_pressure.get_state()) + float(operating),
+        check("static pressure", setting_scalar(far.momentum.gauge_pressure.get_state()) + setting_scalar(operating),
               state["static_pressure_Pa"])
         check("temperature", far.thermal.temperature.get_state(), state["static_temperature_K"])
         flow = far.momentum.flow_direction.get_state()
-        mag = math.hypot(float(flow[0]), float(flow[1]))
+        mag = math.hypot(setting_scalar(flow[0]), setting_scalar(flow[1]))
         if not math.isfinite(mag) or mag == 0:
             raise ValueError("Saved case freestream direction is invalid")
         for i in range(2):
-            check("flow direction", float(flow[i]) / mag, state["drag_direction"][i])
+            check("flow direction", setting_scalar(flow[i]) / mag, state["drag_direction"][i])
     model = setup.models.viscous.model.get_state()
     if model != cfg["physics"].get("viscous_model", "laminar"):
         raise ValueError("Saved case viscous model differs from config; rerun CFD")

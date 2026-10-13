@@ -35,8 +35,8 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
     try:
         solver.settings.file.read_case_data(file_name=str(paths["final_case"]))
         if inspect:
-            info = solver.fields.field_info.get_scalar_fields_info()
-            fields = {name: value for name, value in info.items()
+            info = solver.fields.field_data.scalar_fields.allowed_values()
+            fields = {name: {"field_name": name} for name in info
                       if "flux" in name.casefold() or "heat" in name.casefold()}
             atomic_json(paths["work"] / "available_heat_flux_fields.json", fields)
             print("[export] Heat/flux fields:", ", ".join(fields))
@@ -47,14 +47,19 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                  if z == base or z.startswith(base + ".")]
         result = {}
         if thermal:
+            print("[export] Reading and saving body-wall heating...", flush=True)
             result["thermal_bc_package"] = export_thermal_bc_package(solver, cfg, walls)
+            print("[export] Thermal BC saved:", result["thermal_bc_package"]["body_wall_faces_csv"], flush=True)
         if aero:
             try:
+                print("[export] Computing body-wall forces from saved solution...", flush=True)
                 result["aerodynamics"] = aerodynamic_summary(solver, cfg, walls)
                 result["aerodynamics"]["source_case"] = str(paths["final_case"])
                 atomic_json(paths["work"] / "aero_summary.json", result["aerodynamics"])
+                print("[export] Drag:", result["aerodynamics"]["drag_per_unit_span_N_m"], "N/m", flush=True)
             except Exception as exc:
                 atomic_json(paths["work"] / "aero_summary.json", {"status": "failed", "error": str(exc)})
+                print("[export] Aerodynamic export failed; any completed thermal BC export is retained.", flush=True)
                 raise
         return result
     finally:

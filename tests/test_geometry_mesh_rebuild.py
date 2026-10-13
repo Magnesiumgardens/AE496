@@ -162,13 +162,24 @@ def meshing_session(*, fail_layers=False, write_output=True):
             Path(state["file_name"]).write_bytes(b"mesh data")
     workflow = SimpleNamespace(
         load_cad_geometry_2d=Task(),
-        update_regions_2d=Task(state={"region_name_list": ["fluid"]}),
+        update_regions_2d=Task(state={"region_name_list": [], "region_type_list": [],
+                                    "region_current_list": ["region-uuid"], "region_current_type_list": ["fluid"]}),
         update_boundaries_2d=Task(), define_global_sizing_2d=Task(),
         add_local_sizing_2d=Task(), generate_initial_surface_mesh=Task(),
         add_2d_boundary_layers=Task(layer_callback), write_2d_mesh=Task(write_callback),
     )
     closed = []
-    session = SimpleNamespace(two_dimensional_meshing=lambda: workflow, exit=lambda: closed.append(True))
+    enabled = {"value": False}
+    def enable(value):
+        enabled["value"] = value
+    def initialize(legacy):
+        if not legacy or not enabled["value"]:
+            raise RuntimeError("2-D workflow was not explicitly activated")
+        return workflow
+    session = SimpleNamespace(two_dimensional_meshing=initialize,
+        meshing=SimpleNamespace(GlobalSettings=SimpleNamespace(
+            EnablePrime2dMeshing=SimpleNamespace(set_state=enable))),
+        exit=lambda: closed.append(True))
     return session, workflow, closed
 
 
@@ -188,7 +199,7 @@ class MeshingTests(unittest.TestCase):
 
     def fluent_modules(self, launch):
         return module_chain("ansys.fluent.core", launch_fluent=launch,
-            FluentMode=SimpleNamespace(MESHING="meshing"), Dimension=SimpleNamespace(TWO=2),
+            FluentMode=SimpleNamespace(MESHING="meshing"), Dimension=SimpleNamespace(TWO=2, THREE=3),
             Precision=SimpleNamespace(DOUBLE="double"),
             UIMode=SimpleNamespace(GUI="gui", NO_GUI="no_gui"))
 
@@ -201,7 +212,7 @@ class MeshingTests(unittest.TestCase):
         with patch.dict(sys.modules, self.fluent_modules(launch)):
             result = build_mesh(self.cfg, self.pmdb)
         self.assertEqual(result.read_bytes(), b"mesh data")
-        self.assertEqual(launch_args[0]["dimension"], 2)
+        self.assertEqual(launch_args[0]["dimension"], 3)
         self.assertEqual(launch_args[0]["start_timeout"], 300)
         self.assertEqual(workflow.add_local_sizing_2d.child_states[0]["edge_label_list"], ["body_wall"])
         layers = workflow.add_2d_boundary_layers.child_states[0]
