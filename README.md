@@ -54,6 +54,10 @@ For an existing installation with manually patched adapters,
 consolidated adapter files from that immutable GitHub revision. It downloads
 and compiles all files first, saves the previous source under
 `logs/source_backups/`, and retains configurations and simulation outputs.
+For private GitHub repositories, retrieve the updater through Git and pass
+`--git-repo <source-checkout>`: it reads the pinned files from Git without making
+unauthenticated raw-file requests. The source checkout may be a temporary clone;
+the target project defaults to the current working directory.
 
 ## Configuration and physics
 
