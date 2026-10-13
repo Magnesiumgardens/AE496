@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from .aero import aerodynamic_summary, reference_state
+from .aero import aerodynamic_summary, reference_state, report_scalar
+from .cfd import launch_solver
 
 from .thermal_export import export_thermal_bc_package
-from .utils import work_paths, safe_allowed_values, choose_case_insensitive
+from .utils import work_paths
 
 
 class SolverPipelineError(RuntimeError):
@@ -48,38 +49,14 @@ def _matching_zone_names(bc, base_name: str) -> list[str]:
     return sorted(set(matches))
 
 def _set_wall_thermal(wall, thermal_cfg: dict) -> dict:
-    mode = thermal_cfg["mode"]
+    # This is the CFD reference boundary, not the transient solid temperature.
+    if thermal_cfg["mode"] != "fixed_temperature":
+        raise SolverPipelineError("Use a fixed-temperature CFD heating reference")
+    temperature = float(thermal_cfg["wall_temperature_k"])
+    wall.thermal.thermal_condition = "Temperature"
+    wall.thermal.temperature = temperature
+    return {"thermal_condition": "Temperature", "wall_temperature_k": temperature}
 
-    if mode == "fixed_temperature":
-        wall.thermal.thermal_condition = "Temperature"
-        wall.thermal.temperature = float(thermal_cfg["wall_temperature_k"])
-        return {
-            "thermal_condition": "Temperature",
-            "wall_temperature_k": float(thermal_cfg["wall_temperature_k"]),
-        }
-
-    # For radiative equilibrium, never guess the release-specific enum. Ask Fluent.
-    setting = wall.thermal.thermal_condition
-    allowed = safe_allowed_values(setting)
-    radiation_value = choose_case_insensitive(allowed, "Radiation")
-    if radiation_value is None:
-        raise SolverPipelineError(
-            "thermal.mode=radiative_equilibrium was requested, but this Fluent "
-            f"session does not expose 'Radiation' as a wall thermal condition. "
-            f"Allowed values reported by Fluent: {allowed}. Run tools/probe_fluent.py "
-            "and send the output so the installed-release-specific model can be mapped safely."
-        )
-
-    wall.thermal.thermal_condition = radiation_value
-    wall.thermal.external_emissivity = float(thermal_cfg["emissivity"])
-    wall.thermal.ext_rad_temperature = float(thermal_cfg["external_radiation_temperature_k"])
-    return {
-        "thermal_condition": str(radiation_value),
-        "emissivity": float(thermal_cfg["emissivity"]),
-        "external_radiation_temperature_k": float(
-            thermal_cfg["external_radiation_temperature_k"]
-        ),
-    }
 
 def _temperature_summary(solver, wall_names: list[str]) -> dict:
     reports = solver.settings.solution.report_definitions.surface
@@ -111,46 +88,8 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
         report_defs=report_names
     )
 
-    def first_number(obj):
-        if isinstance(obj, (int, float)):
-            return float(obj)
+    return {key: report_scalar(raw, name) for key, (name, _) in specs.items()}
 
-        if isinstance(obj, dict):
-            for v in obj.values():
-                x = first_number(v)
-                if x is not None:
-                    return x
-
-        if isinstance(obj, (list, tuple)):
-            for v in obj:
-                x = first_number(v)
-                if x is not None:
-                    return x
-
-        return None
-
-    def find_value(obj, target):
-        if isinstance(obj, dict):
-            if target in obj:
-                return first_number(obj[target])
-
-            for v in obj.values():
-                got = find_value(v, target)
-                if got is not None:
-                    return got
-
-        elif isinstance(obj, (list, tuple)):
-            for v in obj:
-                got = find_value(v, target)
-                if got is not None:
-                    return got
-
-        return None
-
-    return {
-        key: find_value(raw, name)
-        for key, (name, _) in specs.items()
-    }
 
 def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
     paths = work_paths(cfg)
@@ -162,33 +101,8 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
     if cfg.get("aero", {}).get("enabled", True):
         reference_state(cfg)  # Validate reference assumptions before launching Fluent.
 
-    # Keep Fluent-generated working/log files out of the project root.
-    log_dir = Path("logs").resolve()
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        import ansys.fluent.core as pyfluent
-    except ImportError as e:
-        raise SolverPipelineError(
-            "PyFluent is not installed. Run: py -m pip install ansys-fluent-core"
-        ) from e
-
-    processors = int(cfg.get("runtime", {}).get("processors", 4))
-    gui = bool(cfg.get("runtime", {}).get("fluent_gui", True))
-    ui_mode = pyfluent.UIMode.GUI if gui else pyfluent.UIMode.NO_GUI
-
     print("[solve] Launching 2-D double-precision Fluent solver...")
-    print(f"[solve] Fluent working directory: {log_dir}")
-
-    solver = pyfluent.launch_fluent(
-        mode=pyfluent.FluentMode.SOLVER,
-        dimension=pyfluent.Dimension.TWO,
-        precision=pyfluent.Precision.DOUBLE,
-        processor_count=processors,
-        ui_mode=ui_mode,
-        cwd=str(log_dir),
-	start_timeout=int(cfg.get("runtime", {}).get("fluent_start_timeout_s", 300)),
-    )
+    solver = launch_solver(cfg)
 
     summary = {}
 
@@ -274,10 +188,9 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
         for zone_name in far_zones:
             far = bc.pressure_far_field[zone_name]
 
-            # operating pressure = 0, therefore gauge pressure numerically
-            # equals the desired absolute freestream static pressure.
-            far.momentum.gauge_pressure = float(
-                cfg["flight"]["static_pressure_pa"]
+            # Fluent requires gauge pressure: p_static minus operating pressure.
+            far.momentum.gauge_pressure = float(cfg["flight"]["static_pressure_pa"]) - float(
+                cfg["physics"].get("operating_pressure_pa", 0.0)
             )
             far.momentum.mach_number = float(
                 cfg["flight"]["mach"]
@@ -298,6 +211,7 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
                 cfg["thermal"],
             )
 
+        summary["cfd_reference_wall_temperature_K"] = cfg["thermal"].get("wall_temperature_k")
         summary["wall_thermal_setup"] = wall_thermal_setup
         summary["body_wall_zones"] = wall_zones
         summary["farfield_zones"] = far_zones
@@ -331,6 +245,8 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
             )
 
         # Only generate solution-derived reports after an actual solve.
+        summary["solution_status"] = "iterations_completed" if ran_iterations else "setup_only"
+        summary["convergence_status"] = "not_verified"
         if ran_iterations:
             if cfg.get("aero", {}).get("enabled", True):
                 try:

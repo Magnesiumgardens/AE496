@@ -1,0 +1,14 @@
+design,time_s,max_wall_temperature_K,mean_wall_temperature_K,mean_definition
+base_geometry_negative_correct,4.0,528.0938100368802,356.49512926029394,simple
+base_geometry_negative_correct,8.0,651.9062590440462,401.31854315718215,simple
+base_geometry_negative_correct,20.0,869.3541033499539,511.79524228764205,simple
+base_geometry_negative_correct,48.56538,1140.476097934598,703.7809298973186,simple
+base_geometry_negative_correct,88.56538,1344.4708111526063,891.6298659956756,simple
+base_geometry_negative_correct,128.56538,1467.5612381488702,1026.8693596445073,simple
+base_geometry_negative_correct,168.56538,1547.6184592411005,1125.8526702863335,simple
+base_geometry_negative_correct,208.56538,1602.3681970386383,1198.9910118834443,simple
+base_geometry_negative_correct,248.56538,1641.0822535563643,1253.3363245216194,simple
+base_geometry_negative_correct,288.56538,1669.0578940218206,1293.853148490299,simple
+base_geometry_negative_correct,328.56538,1689.5551029866174,1324.1213544886396,simple
+base_geometry_negative_correct,368.56538,1704.70375952469,1346.7609843990426,simple
+base_geometry_negative_correct,400.0,1714.0599675064109,1360.8354823716613,simple

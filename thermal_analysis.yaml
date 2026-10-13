@@ -1,14 +1,6 @@
-# 2-D transient tungsten thermal analysis.
-#
-# loading.mode=convective_from_cfd requires TWO CFD endpoints:
-#   300 K cold-wall CFD -> q''_cold(s)
-#   adiabatic CFD       -> T_aw(s)
-# and derives:
-#   h(s) = q''_cold(s) / [T_aw(s) - 300 K]
-# MAPDL then applies q''_conv(s,t)=h(s)[T_aw(s)-T_w(s,t)] plus radiation.
-# This is more realistic than holding the 300 K cold-wall heat flux constant
-# for the entire transient, while remaining much cheaper than full CFD/FEA
-# co-simulation.
+# Transient 2-D solid thermal analysis with direct CFD heat-flux loading.
+# Wall temperature evolves under conduction and optional radiation.
+# No adiabatic reference solution or endpoint-derived convection is required.
 
 mapdl_version: 251
 processors: 4
@@ -22,14 +14,7 @@ emissivity: null
 radiation_temperature_k: null
 
 loading:
-  # convective_from_cfd -> require both CFD endpoints; fail rather than silently
-  #                        downgrade an upgraded PDR result.
-  # auto -> endpoint-derived convection when possible, fixed-q fallback otherwise.
-  # fixed_heat_flux -> legacy 300 K cold-wall q'' held constant.
-  mode: convective_from_cfd
-  adiabatic_csv: null
-  min_delta_temperature_k: 25.0
-  max_film_coefficient_w_m2k: null
+  mode: fixed_heat_flux
 
 material:
   name: Tungsten

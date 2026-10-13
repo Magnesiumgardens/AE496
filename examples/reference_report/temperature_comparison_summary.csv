@@ -1,0 +1,4 @@
+design,source_csv,mean_definition,final_time_s,global_peak_wall_temperature_K,time_of_global_peak_s,final_max_wall_temperature_K,final_mean_wall_temperature_K,nose_s_norm,final_nose_wall_temperature_K,final_wall_sample_count_raw
+base_geometry_negative_correct,runs/base_geometry_negative_correct/thermal_analysis/wall_temperature_history.csv,simple,400.0,1714.0599675064109,400.0,1714.0599675064109,1360.8354823716613,0.49948156834555957,1712.9830107638838,467.0
+blunt_2,runs/blunt_2/thermal_analysis/wall_temperature_history.csv,simple,400.0,1619.8585861139825,400.0,1619.8585861139825,1221.0435095014454,0.5024269575119359,1619.7764463349276,276.0
+sharp,runs/sharp/thermal_analysis/wall_temperature_history.csv,simple,400.0,2467.091908536313,400.0,2467.091908536313,1859.0183460076469,0.501851311203028,2467.091908536313,301.0

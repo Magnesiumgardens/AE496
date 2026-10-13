@@ -1,0 +1,13 @@
+{
+  "status": "screening_only",
+  "pareto_cases": [],
+  "objectives": [
+    "minimize drag per unit span",
+    "minimize peak temperature"
+  ],
+  "limits": "Only configured temperature limits are screened; no material limit is assumed.",
+  "limitations": [
+    "No automatic best-nose selection; convergence and mesh independence remain unverified.",
+    "Moments, stability, structural stress, material property variation and 3-D effects are not evaluated."
+  ]
+}

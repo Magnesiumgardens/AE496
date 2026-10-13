@@ -1,38 +1,30 @@
-# Robust sequential trade-study configuration.
+# Sequential study; one Fluent/MAPDL job at a time.
 geometry_directory: ./geometry_batch
 geometry_glob: "*.x_t"
 base_config: ./config.yaml
 thermal_config: ./thermal_analysis.yaml
 runs_directory: ./runs
-
 resume: true
 stop_on_error: false
-
 run_cfd: true
-ensure_thermal_bc: true
-run_adiabatic_reference: true
-# Require the adiabatic endpoint for every upgraded thermal result. A case is
-# marked failed rather than silently presenting the legacy fixed-q result.
-adiabatic_required: true
 run_thermal: true
-run_extra_static_plots: true
-
-# Retry only after an explicit boundary-layer stage marker, never for generic
-# launcher/API/license failures. An unrecognized marker conservatively disables
-# the retry. Inflation-off cases are excluded from mixed-mesh Pareto ranking.
-retry_cfd_without_boundary_layer: true
-
-# Headless Fluent is less fragile for unattended batches.
 force_fluent_gui: false
 comparison_outputs: true
 
-# Guard rails against ANSYS/PyFluent calls that never return.  The timeout kills
-# the complete child process tree on Windows and lets the batch continue.
+# Only the owned child process tree is stopped on timeout.
 timeouts:
-  cfd_hard_s: 7200
-  cfd_inactivity_s: 600
-  thermal_export_hard_s: 1200
-  adiabatic_hard_s: 3600
-  adiabatic_inactivity_s: 1200
-  thermal_hard_s: 5400
-  plot_hard_s: 600
+  mesh:
+    hard_s: 7200
+    inactivity_s: 600
+  solver:
+    hard_s: 7200
+    inactivity_s: 1200
+  thermal_export:
+    hard_s: 1200
+    inactivity_s: 600
+  aero:
+    hard_s: 1200
+    inactivity_s: 600
+  thermal:
+    hard_s: 5400
+    inactivity_s: 5400

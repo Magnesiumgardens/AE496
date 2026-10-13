@@ -1,0 +1,16 @@
+{
+  "status": "complete",
+  "warnings": [],
+  "wall_mean_definition": "simple arithmetic mean of saved wall samples; not area weighted",
+  "normalization": "rear\u2192nose\u2192rear; physical arc length on each side maps to half-range",
+  "reference_data": "Imported historical data are report fixtures, not new simulation results.",
+  "validated_unlabeled_wall_design": "sharp",
+  "outputs": {
+    "wall_temperature_history_comparison": "examples/reference_report/wall_temperature_history_comparison.csv",
+    "final_wall_temperature_normalized_position": "examples/reference_report/final_wall_temperature_normalized_position.csv",
+    "temperature_comparison_summary": "examples/reference_report/temperature_comparison_summary.csv",
+    "wall_temperature_history_png": "examples/reference_report/wall_temperature_history_comparison.png",
+    "final_wall_temperature_normalized_png": "examples/reference_report/final_wall_temperature_normalized_position.png",
+    "nose_trade_screening": "examples/reference_report/nose_trade_screening.json"
+  }
+}

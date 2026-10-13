@@ -1,25 +1,24 @@
-# Hypersonic 2-D external-flow PDR screening pipeline
-# ANSYS 2025 R1 / PyFluent workflow used by this project.
-#
-# IMPORTANT MODEL INTENT
-# - The primary CFD remains a 300 K cold-wall case so Fluent produces q''(s).
-# - run_adiabatic_reference.py then reuses the converged case with q''=0 to
-#   obtain T_aw(s).  The thermal model combines both endpoint CFD solutions.
-# - Geometry input is one 2-D FLUID SURFACE in the global XY plane:
-#     outer far-field rectangle MINUS the vehicle (vehicle is an inner hole).
+# CFD reference case template for the planar hypersonic nose study.
+# CFD uses a prescribed wall temperature to calculate q''; the solid thermal
+# solver then evolves its own temperature under that direct flux + radiation.
+# Batch generates a separate case config and work directory for each CAD file.
 
 project:
-  name: nose_M8
-  work_dir: ./runs/nose_M8
+  name: _batch_template
+  work_dir: ./runs/_batch_template
 
 runtime:
   processors: 4
-  fluent_gui: true
+  fluent_gui: false
   geometry_launch_mode: spaceclaim
   fluent_start_timeout_s: 300
+  fluent_version: "25.1.0"
+  geometry_version: 251
+  geometry_start_timeout_s: 300
+  meshing_release_delay_s: 10
 
 geometry:
-  input_file: "C:/Users/mattk/school/AE 496/arbiter/raw geometries/dimensional_geometry.x_t"
+  input_file: ./geometry_batch/blunt_1.x_t
   input_kind: prepared_fluid_surface
   auto_label: true
   body_wall_name: body_wall
@@ -51,7 +50,7 @@ flight:
   mach: 8.0
   static_pressure_pa: 1090.0
   static_temperature_k: 226.5
-  flow_direction: [1.0, 0.0]
+  flow_direction: [-1.0, 0.0]
 
 physics:
   viscous_model: laminar
@@ -64,8 +63,8 @@ physics:
     sutherland_effective_temperature_k: 110.56
 
 thermal:
-  # Keep this as fixed_temperature.  It is the cold-wall endpoint used to
-  # calculate aerodynamic heat flux.  Adiabatic is run separately afterward.
+  # Fluent reference wall temperature for the heating calculation.
+  # This does not hold the transient MAPDL solid at 300 K.
   mode: fixed_temperature
   wall_temperature_k: 300.0
 
@@ -78,10 +77,6 @@ thermal:
   # wall temperature because radiation scales with T_w^4.
   external_radiation_temperature_k: 226.5
 
-adiabatic_reference:
-  # Starts from the converged cold-wall solution and does NOT reinitialize.
-  max_iterations: 600
-
 solver:
   density_solver: density-based-implicit
   steady: true
@@ -90,11 +85,16 @@ solver:
   hybrid_initialize: true
 
 thermal_export:
+  enabled: true
   output_directory: thermal_bc
+  heat_flux_field_name: heat-flux
+  # Explicit raw-field to INTO-WALL convention. Verify on the known case;
+  # use -1 only if Fluent's selected field uses the opposite convention.
+  heat_flux_into_wall_sign: 1.0
 
 outputs:
   write_case_data: true
-  export_custom_heat_flux: true
+  export_custom_heat_flux: false
   compute_temperature_summary: true
 
 # Planar sectional screening, not an axisymmetric or whole-vehicle model.
@@ -107,3 +107,8 @@ aero:
   reference_length_m: null
   ratio_of_specific_heats: 1.4
   gas_constant_j_kgk: 287.05
+
+reporting:
+  # Geometric nose is +X in these profiles, independent of velocity direction.
+  nose_direction: [1.0, 0.0]
+  wall_mean: simple
