@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from pipeline.aero import aerodynamic_summary, report_scalar, setting_scalar, validate_saved_conditions
 from pipeline.cfd import export_saved_case
+from pipeline.solve import _temperature_summary
 from test_nose_trade import config
 
 
@@ -34,21 +35,40 @@ class ExistingReports(dict):
 class Fluent251Adapters(unittest.TestCase):
     def test_saved_reports_reused_and_named_force_enum_and_value_index_decoded(self):
         drag, lift = Report251("drag"), Report251("lift")
+        calls = []
+        def compute(report_defs):
+            calls.append(report_defs)
+            values = {"nose-study-drag": 309.64991, "nose-study-lift": -322.61433}
+            # Multiple requested reports arrive in separate dictionaries.
+            return [{name: [values[name], 0]} for name in report_defs]
         definitions = SimpleNamespace(
             drag=ExistingReports({"nose-study-drag": drag}),
             lift=ExistingReports({"nose-study-lift": lift}),
-            compute=lambda report_defs: [{"nose-study-drag": [12.0, 0], "nose-study-lift": [-3.0, 0]}, {}])
+            compute=compute)
         solver = SimpleNamespace(settings=SimpleNamespace(
             setup=SimpleNamespace(reference_values=SimpleNamespace(),
                 general=SimpleNamespace(solver=SimpleNamespace(
                     two_dim_space=SimpleNamespace(get_state=lambda: "planar")))),
             solution=SimpleNamespace(report_definitions=definitions)))
         result = aerodynamic_summary(solver, config(), ["body_wall"])
-        self.assertEqual(result["drag_per_unit_span_N_m"], 12)
-        self.assertEqual(result["lift_per_unit_span_N_m"], -3)
+        self.assertEqual(result["drag_per_unit_span_N_m"], 309.64991)
+        self.assertEqual(result["lift_per_unit_span_N_m"], -322.61433)
+        self.assertEqual(calls, [["nose-study-drag"], ["nose-study-lift"]])
         self.assertEqual(drag.report_output_type, "Drag Force")
         self.assertEqual(lift.report_output_type, "Lift Force")
         self.assertIs(definitions.drag["nose-study-drag"], drag)
+
+    def test_temperature_reports_are_also_queried_individually(self):
+        values = {"auto-wall-temp-min": 290, "auto-wall-temp-avg": 300, "auto-wall-temp-max": 310}
+        calls = []
+        def compute(report_defs):
+            calls.append(report_defs)
+            return [{name: [values[name], 0]} for name in report_defs]
+        solver = SimpleNamespace(settings=SimpleNamespace(solution=SimpleNamespace(
+            report_definitions=SimpleNamespace(surface=ExistingReports(), compute=compute))))
+        self.assertEqual(_temperature_summary(solver, ["body_wall"]), {
+            "wall_temperature_min_k": 290, "wall_temperature_avg_k": 300, "wall_temperature_max_k": 310})
+        self.assertEqual(calls, [[name] for name in values])
 
     def test_report_value_not_iteration_and_invalid_layouts_fail(self):
         self.assertEqual(report_scalar({"temp": [300.0, 0]}, "temp"), 300)

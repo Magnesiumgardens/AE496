@@ -49,6 +49,8 @@ def fluent():
         values = {}
         for kind in ("drag", "lift"):
             for name, report in getattr(definitions, kind).items():
+                if name not in report_defs:
+                    continue
                 assert report.report_output_type == "Force"
                 assert report.zones == ["body_wall.1", "body_wall.2"]
                 vector = report.force_vector

@@ -67,8 +67,6 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
         "wall_temperature_max_k": ("auto-wall-temp-max", "surface-facetmax"),
     }
 
-    report_names = []
-
     for _, (name, rtype) in specs.items():
         try:
             if name in reports.get_object_names():
@@ -82,13 +80,9 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
             "field": "temperature",
         }
 
-        report_names.append(name)
-
-    raw = solver.settings.solution.report_definitions.compute(
-        report_defs=report_names
-    )
-
-    return {key: report_scalar(raw, name) for key, (name, _) in specs.items()}
+    compute = solver.settings.solution.report_definitions.compute
+    return {key: report_scalar(compute(report_defs=[name]), name)
+            for key, (name, _) in specs.items()}
 
 
 def solve_case(cfg: dict, mesh_file: str | Path) -> dict:

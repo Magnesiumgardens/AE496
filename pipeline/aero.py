@@ -209,8 +209,11 @@ def aerodynamic_summary(solver, cfg, wall_zones):
         refs.length = state["reference_length_m"]
     names = [_force_report(solver, kind, zones, state[kind + "_direction"])
              for kind in ("drag", "lift")]
-    raw = solver.settings.solution.report_definitions.compute(report_defs=names)
-    drag, lift = [report_scalar(raw, n) / state["report_depth_m"] for n in names]
+    # Query separately: 251 can return separate mappings for a multi-report
+    # request, which is ambiguous with clients' value/iteration mappings.
+    compute = solver.settings.solution.report_definitions.compute
+    drag, lift = [report_scalar(compute(report_defs=[name]), name)
+                  / state["report_depth_m"] for name in names]
     width = state["reference_area_per_unit_span_m"]
     scale = state["dynamic_pressure_Pa"] * width if width is not None else None
     return {
