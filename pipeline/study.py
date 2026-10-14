@@ -269,11 +269,16 @@ def _archive_stage(stage, work, cfg, state):
     print(f"[resume] Retained previous outputs: {archive}")
 
 
-def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=True, stop_after="aero",
+def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=True, stop_after=None,
              *, _runner=None, _enabled_stages=None, _timeouts=None, _allow_adopt=True):
     from .config import load_config
     config_path = Path(config_path).resolve()
     cfg = load_config(config_path)
+    if cfg.get("workflow",{}).get("strategy") == "two_endpoint":
+        from .endpoint_workflow import run_case as run_endpoints
+        return run_endpoints(config_path,thermal_config_path,resume,stop_after,runner=_runner,
+                             enabled=_enabled_stages,timeouts=_timeouts,allow_adopt=_allow_adopt)
+    stop_after = stop_after or "aero"
     work = Path(cfg["project"]["work_dir"]).resolve()
     work.mkdir(parents=True, exist_ok=True)
     if stop_after not in STAGES:
@@ -419,9 +424,11 @@ def main(batch_config_path="batch.yaml"):
     runs = resolve(root, batch.get("runs_directory", "runs"))
     stop_after = batch.get("stop_after", "thermal" if batch.get("run_thermal", False) else "aero")
     thermal_path = resolve(root, batch.get("thermal_config", "thermal_analysis.yaml"))
-    enabled = set(STAGES)
+    from .endpoint_workflow import STAGES as ENDPOINT_STAGES
+    endpoint = base.get("workflow",{}).get("strategy") == "two_endpoint"
+    enabled = set(ENDPOINT_STAGES if endpoint else STAGES)
     if not batch.get("run_cfd", True):
-        enabled -= {"mesh", "solver"}
+        enabled -= {"mesh", "cold_wall", "adiabatic"} if endpoint else {"mesh", "solver"}
     rows = []
     for geometry, name in zip(geometries, names):
         directory, started = runs / name, time.monotonic()

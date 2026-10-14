@@ -13,8 +13,17 @@ from pipeline.thermal_export import export_thermal_bc_package, order_segments, u
 
 
 class ConfigTests(unittest.TestCase):
-    def test_relative_paths_are_case_config_relative_and_direction_is_normalized(self):
+    @staticmethod
+    def direct_adiabatic_config():
         data = yaml.safe_load(Path("config.yaml").read_text())
+        data.pop("workflow", None);data.pop("thermal_export", None)
+        data["thermal"] = {"mode":"adiabatic"}
+        data["solver"].update(initialization="freestream",courant_number=.1,
+                             flow_scheme="first-order-upwind",residual_thresholds={"energy":1e-6})
+        return data
+
+    def test_relative_paths_are_case_config_relative_and_direction_is_normalized(self):
+        data = self.direct_adiabatic_config()
         data["flight"]["flow_direction"] = [0, -2]
         data["project"]["work_dir"] = "../case"
         data["geometry"]["input_file"] = "../shape.x_t"
@@ -31,7 +40,7 @@ class ConfigTests(unittest.TestCase):
     def test_directory_is_not_a_config_and_invalid_physics_fail_before_launch(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ConfigError):load_config(directory)
-            data = yaml.safe_load(Path("config.yaml").read_text())
+            data = self.direct_adiabatic_config()
             config = Path(directory) / "case.yaml"
             for field, value in (("max_iterations", 1.5), ("max_iterations", float("nan"))):
                 data["solver"][field] = value

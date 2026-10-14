@@ -15,7 +15,7 @@ import yaml
 
 # The initial helper runs from a freshly fetched source checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pipeline.migration import adiabatic_config, adiabatic_state
+from pipeline.migration import endpoint_config, endpoint_state, endpoint_thermal_config, endpoint_batch_config
 
 
 def git(repository, *args):
@@ -30,7 +30,8 @@ def update_project(root, source, revision=None):
     tracked = git(source, "ls-tree", "-r", "--name-only", revision).decode().splitlines()
     selected = [name for name in tracked if
         (name.endswith(".py") and ("/" not in name or name.startswith(("pipeline/", "scripts/", "tests/"))))
-        or name in ("README.md", "requirements.txt", "thermal_analysis.yaml")
+        or name in ("README.md", "NOSE_TRADE_README.md", "requirements.txt", "thermal_analysis.yaml")
+        or (name.startswith("docs/") and name.endswith(".md"))
         or name.startswith("examples/reference_results/")]
     payload = {name: git(source, "show", f"{revision}:{name}") for name in selected}
     for name, data in payload.items():
@@ -38,32 +39,25 @@ def update_project(root, source, revision=None):
     config_paths = [root / "config.yaml", *sorted((root / "runs").glob("*/_batch/config.yaml"))]
     for path in config_paths:
         old = yaml.safe_load(path.read_bytes()) if path.is_file() else yaml.safe_load(git(source, "show", f"{revision}:config.yaml"))
-        new = adiabatic_config(old)
+        new = endpoint_config(old)
         if old != new or not path.is_file():
             payload[str(path.relative_to(root))] = yaml.safe_dump(new, sort_keys=False).encode()
             state_path = path.parent / "stage_state.json"
             if path.parent.name == "_batch" and state_path.is_file():
                 state = json.loads(state_path.read_text(encoding="utf-8"))
-                payload[str(state_path.relative_to(root))] = (json.dumps(adiabatic_state(state), indent=2) + "\n").encode()
+                payload[str(state_path.relative_to(root))] = (json.dumps(endpoint_state(state), indent=2) + "\n").encode()
     batch_path = root / "batch.yaml"
     batch = yaml.safe_load(batch_path.read_bytes()) if batch_path.is_file() else yaml.safe_load(git(source, "show", f"{revision}:batch.yaml"))
-    batch.pop("run_adiabatic_reference", None)
-    if batch.get("stop_after") == "thermal_export":
-        batch["stop_after"] = "aero"
-    timeouts = batch.get("timeouts", {})
-    if "thermal_export" in timeouts:timeouts["temperature_export"] = timeouts.pop("thermal_export")
+    batch = endpoint_batch_config(batch)
     payload["batch.yaml"] = yaml.safe_dump(batch, sort_keys=False).encode()
     thermal_path = root / "thermal_analysis.yaml"
     if thermal_path.is_file():
         previous = yaml.safe_load(thermal_path.read_bytes()) or {}
-        if (previous.get("loading", {}) or {}).get("mode") == "convection":
-            # A user's h, exposure duration and material values are inputs, not code.
+        if (previous.get("loading", {}) or {}).get("mode") == "convective_from_cfd":
+            # Existing endpoint exposure/material values are inputs, not code.
             payload.pop("thermal_analysis.yaml", None)
         else:
-            new_thermal = yaml.safe_load(payload["thermal_analysis.yaml"])
-            # Preserve material choices while replacing the obsolete load model.
-            for key in ("material", "mesh_size_m", "initial_temperature_k", "mapdl_version", "processors"):
-                if previous.get(key) is not None:new_thermal[key] = previous[key]
+            new_thermal = endpoint_thermal_config(previous, yaml.safe_load(payload["thermal_analysis.yaml"]))
             payload["thermal_analysis.yaml"] = yaml.safe_dump(new_thermal, sort_keys=False).encode()
     originals = {}
     for name in payload:
@@ -95,8 +89,9 @@ def update_project(root, source, revision=None):
             raise
     print(f"[update] Installed complete study from {revision}")
     print(f"[update] Previous code/configs saved: {backup}")
-    print("[update] Configs are adiabatic. Existing meshes and CFD/thermal results are retained.")
-    print("[update] The next study run reuses its mesh and reruns CFD with zero wall heat flux.")
+    print("[update] Two-endpoint CFD calibration restored. Existing meshes and simulation results are retained.")
+    print("[update] Migrated cases reuse their mesh, then run cold-wall and warm-started adiabatic CFD.")
+    print("[update] Mechanical uses the derived spatial h; material choices and exposure durations are retained.")
     return backup
 
 

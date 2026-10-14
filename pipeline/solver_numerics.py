@@ -7,8 +7,10 @@ from .aero import reference_state
 def configure_numerics(solver,cfg):
     options = cfg["solver"]
     solution = solver.settings.solution
-    courant = float(options.get("courant_number", .1))
-    solution.controls.courant_number = courant
+    requested_courant = options.get("courant_number", .1)
+    if requested_courant is not None:
+        solution.controls.courant_number = float(requested_courant)
+    courant = float(solution.controls.courant_number.get_state()) if requested_courant is None else float(requested_courant)
     schemes = solution.methods.spatial_discretization.discretization_scheme
     wanted = options.get("flow_scheme", "first-order-upwind")
     names = schemes.get_object_names()
@@ -21,15 +23,18 @@ def configure_numerics(solver,cfg):
     entry = schemes[key]
     allowed = entry.allowed_values()
     def canonical(value):return "".join(c for c in str(value).casefold() if c.isalnum())
-    selected = next((value for value in allowed if canonical(value) == canonical(wanted)), None)
+    selected = (entry.get_state() if wanted is None else
+                next((value for value in allowed if canonical(value) == canonical(wanted)), None))
     if selected is None:
         raise ValueError(f"Flow scheme {wanted!r} unavailable on {key!r}; native choices={allowed}")
-    schemes[key] = selected
+    if wanted is not None:schemes[key] = selected
     actual = schemes[key].get_state()
     if canonical(actual) != canonical(selected):
         raise ValueError(f"Fluent {key!r}: requested {selected!r}, returned {actual!r}")
     print(f"[solve] Numerics: Courant={courant:g}; flow[{key}]={selected}",flush=True)
-    return dict(courant_number=courant,flow_scheme=selected,flow_scheme_entry=key)
+    return dict(courant_number=courant,flow_scheme=selected,flow_scheme_entry=key,
+                courant_source="native" if requested_courant is None else "configured",
+                flow_scheme_source="native" if wanted is None else "configured")
 
 
 def initialize_flow(solver,cfg,farfield):

@@ -1,11 +1,12 @@
 """Per-nose and comparison figures for steady adiabatic CFD gas temperatures."""
 from pathlib import Path
+import copy
 import json
 
 import numpy as np
 import yaml
 
-from .aero import reference_state
+from .aero import MODEL_VERSION as AERO_MODEL_VERSION, reference_state
 from .reporting import load_yaml, read_csv, read_json, write_csv
 from .temperature_export import temperature_paths, temperature_conditions
 from .trade_study import aero_complete, comparison_key, read_aero
@@ -20,6 +21,8 @@ CASE_ARTIFACTS = (
     "near_wall_fluid_temperature_map.png", "adiabatic_wall_heat_flux_profile.png",
     "adiabatic_wall_heat_flux_map.png", "fluid_temperature_nodes.png",
     "fluid_temperature_near_wall.png", "temperature_convergence.png", "adiabatic_case_report.json",
+    "derived_h_profile.csv", "derived_h_profile.png", "derived_h_map.png",
+    "cold_wall_heat_flux_profile.png", "cold_wall_heat_flux_map.png",
 )
 COMPARISON_ARTIFACTS = (
     "adiabatic_temperature_summary.csv", "adiabatic_temperature_profiles.csv",
@@ -27,6 +30,7 @@ COMPARISON_ARTIFACTS = (
     "wall_temperature_maps_comparison.png", "near_wall_fluid_temperature_maps_comparison.png",
     "gas_temperature_statistics_comparison.png", "drag_vs_near_wall_temperature.png",
     "temperature_convergence_comparison.png",
+    "heat_transfer_coefficient_comparison.png",
     "adiabatic_report.json",
 )
 
@@ -36,15 +40,69 @@ def _clear_generated(directory, filenames):
         (Path(directory) / name).unlink(missing_ok=True)
 
 
+def report_cfg(cfg):
+    """Use recovery-state physics while keeping reports in the nose directory."""
+    if cfg.get("workflow", {}).get("strategy") != "two_endpoint":
+        return cfg
+    result = copy.deepcopy(cfg)
+    work = Path(cfg.get("_study_work_dir", cfg["project"]["work_dir"]))
+    result["project"]["work_dir"] = str(work)
+    result["thermal"] = {"mode": "adiabatic"}
+    directory = Path(cfg.get("temperature_export",{}).get("output_directory","temperature"))
+    result.setdefault("temperature_export", {})["output_directory"] = str(directory if directory.is_absolute() else work/directory)
+    return result
+
+
+def source_work(cfg):
+    """The source solution lives inside an endpoint folder in the restored study."""
+    work = Path(cfg.get("_study_work_dir", cfg["project"]["work_dir"]))
+    return work / "cfd/adiabatic" if cfg.get("workflow", {}).get("strategy") == "two_endpoint" else work
+
+
+def source_cfg(cfg):
+    result = copy.deepcopy(report_cfg(cfg))
+    result["project"]["work_dir"] = str(source_work(cfg))
+    return result
+
+
+def aero_complete_for_report(cfg):
+    """Endpoint forces are stored at the nose root but come from adiabatic CFD."""
+    work = Path(cfg.get("_study_work_dir", cfg["project"]["work_dir"]))
+    if cfg.get("workflow", {}).get("strategy") != "two_endpoint":
+        return aero_complete(work, cfg)
+    result = read_aero(work)
+    if result.get("status") != "complete" or result.get("model_version") != AERO_MODEL_VERSION:
+        return False
+    if any(result.get(key) != value for key, value in reference_state(report_cfg(cfg)).items()):
+        return False
+    base = cfg["geometry"].get("body_wall_name", "body_wall")
+    zones = result.get("body_wall_zones", [])
+    if not zones or any(zone != base and not zone.startswith(base + ".") for zone in zones):
+        return False
+    try:
+        source = source_work(cfg)
+        recorded = result.get("source_sha256")
+        expected = {"final_case": file_sha256(source / "04_final.cas.h5"),
+                    "final_data": file_sha256(source / "04_final.dat.h5")}
+        if recorded is not None:
+            return recorded == expected
+        saved = (work / "aero_summary.json").stat().st_mtime_ns
+        return all((source / name).stat().st_mtime_ns <= saved
+                   for name in ("04_final.cas.h5", "04_final.dat.h5"))
+    except OSError:
+        return False
+
+
 def temperature_complete(cfg):
     try:
+        cfg = report_cfg(cfg)
         if cfg.get("thermal") != {"mode": "adiabatic"}:
             return False
         csv_path, summary_path = temperature_paths(cfg)
         summary = read_json(summary_path)
         if summary.get("status") != "complete" or summary.get("thermal_mode") != "adiabatic":
             return False
-        work = Path(cfg["project"]["work_dir"])
+        work = source_work(cfg)
         return (summary.get("temperature_export_signature") == cfg.get("temperature_export", {}) and
                 summary.get("conditions") == temperature_conditions(cfg) and
                 summary.get("wall_csv_sha256") == file_sha256(csv_path) and
@@ -63,17 +121,18 @@ def build_gas_row(cfg, status="complete", elapsed_s=0, error=""):
     if not isinstance(project, dict):
         project = {}
     try:
-        _, summary_path = temperature_paths(cfg)
+        gas_cfg = report_cfg(cfg)
+        _, summary_path = temperature_paths(gas_cfg)
         summary = read_json(summary_path)
-        work = Path(project["work_dir"])
+        work = Path(gas_cfg["project"]["work_dir"])
         aero = read_aero(work)
         fresh_temp = temperature_complete(cfg)
         # Validate before aero_complete's early cache-status return so invalid
         # reference settings are reported consistently for failed batch cases.
-        reference_state(cfg)
-        fresh_aero = aero_complete(work, cfg)
+        reference_state(gas_cfg)
+        fresh_aero = aero_complete_for_report(cfg)
         from .solution_quality import saved_quality
-        quality = saved_quality(cfg)
+        quality = saved_quality(source_cfg(cfg))
         if quality["status"] == "failed":
             status = "unconverged"
             problems.extend(quality.get("reasons",[]))
@@ -210,6 +269,23 @@ def _read_history(work, temperature_summary, warnings, case):
         return []
 
 
+def _read_convection(cfg, warnings, case):
+    if cfg.get("workflow", {}).get("strategy") != "two_endpoint":
+        return []
+    from .endpoint_loading import verify_convection_package
+    from .thermal_loading import ThermalAnalysisError
+    try:
+        path, _ = verify_convection_package(cfg)
+        rows = profile(read_csv(path), report_cfg(cfg))
+        coefficients = np.asarray([float(row["heat_transfer_coefficient_W_m2K"]) for row in rows])
+        if not np.isfinite(coefficients).all() or np.any(coefficients < 0):
+            raise ValueError("Derived convection coefficients must be finite and nonnegative")
+        return rows
+    except (OSError, ValueError, KeyError, TypeError, ThermalAnalysisError) as exc:
+        warnings.append(f"{case}: derived convection plots unavailable ({exc})")
+        return []
+
+
 def _case_figures(case, temperature_ranges, plt):
     cfg, values, summary, points = case["cfg"], case["values"], case["summary"], case["nodes"]
     report_dir, name = case["work"] / "reports", cfg["project"]["name"]
@@ -280,11 +356,45 @@ def _case_figures(case, temperature_ranges, plt):
         ax.legend()
         ax.grid(alpha=0.3)
         files["temperature_convergence"] = _save(fig, report_dir / "temperature_convergence.png", plt)
+    convection = case.get("convection", [])
+    if convection:
+        column = "heat_transfer_coefficient_W_m2K"
+        files["derived_h_profile_csv"] = str(write_csv(report_dir / "derived_h_profile.csv", convection))
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.plot([row["s_norm"] for row in convection], [float(row[column]) for row in convection])
+        ax.set(xlabel="Normalized wall position, back → nose → back", ylabel="h [W/(m² K)]",
+               title=name + " — cold-wall calibrated convection coefficient", xlim=(0, 1))
+        ax.grid(alpha=0.3)
+        files["derived_h_profile"] = _save(fig, report_dir / "derived_h_profile.png", plt)
+        coefficients = [float(row[column]) for row in convection]
+        low, high = min(coefficients), max(coefficients)
+        limits = (low, high if high > low else high + max(1., high * 0.005))
+        fig, ax = plt.subplots(figsize=(10, 4))
+        scatter = _wall_map(ax, convection, column, name + " — spatial convection input", limits, cmap="viridis")
+        fig.colorbar(scatter, ax=ax, label="h [W/(m² K)]")
+        files["derived_h_map"] = _save(fig, report_dir / "derived_h_map.png", plt)
+        # Signed cold-wall face flux projected to vertices is calibration data,
+        # distinct from Mechanical's changing convection/radiation load.
+        column = "cold_heat_flux_into_wall_W_m2"
+        fig, ax = plt.subplots(figsize=(9,5))
+        ax.plot([row["s_profile_m"] for row in convection],[float(row[column]) for row in convection])
+        ax.set(xlabel="Distance along wall [m]",ylabel="Calibration heat flux into wall [W/m²]",
+               title=name+" — cold-wall reference (face values projected to vertices)")
+        ax.grid(alpha=.3)
+        files["cold_wall_heat_flux_profile"] = _save(fig,report_dir/"cold_wall_heat_flux_profile.png",plt)
+        flux = [float(row[column]) for row in convection]
+        low, high = min(flux),max(flux)
+        limits = (low, high if high > low else high+max(1.,abs(high)*.005))
+        fig, ax = plt.subplots(figsize=(10,4))
+        scatter = _wall_map(ax,convection,column,name+" — cold-wall calibration heat flux",limits,cmap="viridis")
+        fig.colorbar(scatter,ax=ax,label="Calibration heat flux into wall [W/m²]")
+        files["cold_wall_heat_flux_map"] = _save(fig,report_dir/"cold_wall_heat_flux_map.png",plt)
     manifest = dict(model="steady_adiabatic_planar_CFD", files=files,
                     wall_boundary_condition="q_wall = 0; no radiation or imposed wall temperature",
                     temperature_color_ranges_K=temperature_ranges, sampling=summary.get("sampling", {}),
                     spatial_method="Temperature-colored samples; no interpolation across the vehicle interior.",
                     convergence_history_samples=len(case["history"]),
+                    convection="Cold-wall calibrated spatial h, held constant as the solid warms." if convection else "No current derived-h package plotted.",
                     history="Steady CFD has no physical time history or transient solid temperature field.")
     target = report_dir / "adiabatic_case_report.json"
     target.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -330,7 +440,7 @@ def create_gas_reports(runs_dir, output_dir):
         row = None
         try:
             cfg = load_yaml(path)
-            if cfg.get("thermal") != {"mode": "adiabatic"}:
+            if cfg.get("thermal") != {"mode": "adiabatic"} and cfg.get("workflow", {}).get("strategy") != "two_endpoint":
                 continue
             cfg.setdefault("project", {})["work_dir"] = str(work.resolve())
             cfg["project"].setdefault("name", work.name)
@@ -344,9 +454,10 @@ def create_gas_reports(runs_dir, output_dir):
             if row["temperature_status"] != "complete":
                 warnings.append(f"{work.name}: missing or stale adiabatic temperature export")
                 continue
-            validate_stage_outputs("temperature_export", stage_files(work, cfg)["temperature_export"])
-            wall_csv, summary_path = temperature_paths(cfg)
-            values = profile(read_csv(wall_csv), cfg)
+            gas_cfg = report_cfg(cfg)
+            validate_stage_outputs("temperature_export", stage_files(work, gas_cfg)["temperature_export"])
+            wall_csv, summary_path = temperature_paths(gas_cfg)
+            values = profile(read_csv(wall_csv), gas_cfg)
             for column in ("wall_temperature_K", "near_wall_fluid_temperature_K"):
                 _temperature_range(values, column)
             summary = read_json(summary_path)
@@ -356,11 +467,12 @@ def create_gas_reports(runs_dir, output_dir):
                 temperatures = [float(value[column]) for value in values]
                 row[f"maximum_{prefix}_temperature_K"] = max(temperatures)
                 row[f"mean_{prefix}_temperature_K"] = float(np.average(temperatures, weights=weights))
-            case = dict(cfg=cfg, work=work, values=values, summary=summary,
+            case = dict(cfg=gas_cfg, work=work, values=values, summary=summary,
                         nodes=_read_nodes(summary, wall_csv, warnings, work.name), row=row,
-                        history=_read_history(work, summary, warnings, work.name))
+                        history=_read_history(source_work(cfg), summary, warnings, work.name),
+                        convection=_read_convection(cfg, warnings, work.name))
             cases.append(case)
-            conditions.add(comparison_key(reference_state(cfg), json.dumps(cfg.get("mesh", {}), sort_keys=True)))
+            conditions.add(comparison_key(reference_state(gas_cfg), json.dumps(cfg.get("mesh", {}), sort_keys=True)))
         except (ValueError, KeyError, OSError, TypeError, AttributeError, BatchError, yaml.YAMLError) as exc:
             if row is None:
                 rows.append(dict(case=work.name, status="invalid_export", thermal_mode="adiabatic", error=str(exc)))
@@ -384,6 +496,19 @@ def create_gas_reports(runs_dir, output_dir):
     created["temperature_profiles"] = str(write_csv(output_dir / "adiabatic_temperature_profiles.csv", profiles,
         fields=list(profiles[0]) if profiles else ["design", "s_norm", "wall_temperature_K", "near_wall_fluid_temperature_K"]))
     if comparable and profiles:
+        with_convection = [case for case in cases if case["convection"]]
+        if with_convection:
+            fig, ax = plt.subplots(figsize=(10, 5))
+            for case in with_convection:
+                ax.plot([row["s_norm"] for row in case["convection"]],
+                        [float(row["heat_transfer_coefficient_W_m2K"]) for row in case["convection"]],
+                        label=case["cfg"]["project"]["name"])
+            ax.set(xlabel="Normalized wall position, back → nose → back", ylabel="h [W/(m² K)]",
+                   title="Cold-wall calibrated spatial convection coefficients", xlim=(0, 1))
+            ax.legend()
+            ax.grid(alpha=0.3)
+            created["heat_transfer_coefficient_comparison"] = _save(
+                fig, output_dir / "heat_transfer_coefficient_comparison.png", plt)
         for column, label in (("wall_temperature_K", "Adiabatic wall / recovery temperature"),
                               ("near_wall_fluid_temperature_K", "Fluid-side static temperature (surface samples)")):
             fig, ax = plt.subplots(figsize=(10, 5))

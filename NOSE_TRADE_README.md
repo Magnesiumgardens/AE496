@@ -1,22 +1,25 @@
 # Migration from the previous project
 
-Use the commands in [README.md](README.md). The code now lives in shared
-`pipeline/` modules; the familiar `run_all.py`, `run_solver_only.py`,
-`export_thermal_only.py`, `export_aero_only.py`, `run_thermal_analysis.py`,
-`run_batch.py`, and `compare_nose_trade.py` are compatibility entry points.
+Use the update and run commands in [README.md](README.md). Shared `pipeline/`
+modules hold the implementation; `study.py` runs, resumes and reports the study.
+The familiar solver, exporter, thermal and batch scripts remain compatibility
+entry points.
 
-Place original CAD inputs in `geometry_batch/`. Keep existing `runs/<case>/`
-folders if you want to resume them. The case-specific `_batch/config.yaml`
-remains the authoritative case/work-directory mapping. Existing outputs without
-fingerprint metadata can be adopted, explicitly marked as unverified provenance.
-Changed inputs preserve previous outputs under `_history/` before rerunning.
+Keep original CAD inputs in `geometry_batch/` and case folders in `runs/<case>/`.
+The case-specific `_batch/config.yaml` is the authoritative work-directory and
+geometry mapping. Updates preserve meshes and simulation files and retain
+superseded results under `_history/`. A prior direct-adiabatic solution is not
+silently adopted as a cold-wall calibration.
 
-The new default thermal model is direct CFD heat flux with conduction and
-radiation, as requested. Adiabatic-reference runs and endpoint requirements
-have been removed. Historical CSVs containing convection/adiabatic columns are
-still readable for reports, but their physics are not relabeled as new runs.
+The restored default is **cold-wall steady CFD → warm-started adiabatic CFD →
+spatial convection coefficient and recovery temperature → separate transient
+Mechanical APDL analysis**. Aerodynamic exports and comparison reports are
+retained. Cold-wall heat flux calibrates `h`; it is not applied as a constant
+flux through the solid exposure. See the evidence and limits in
+[docs/ORIGINAL_WORKFLOW_COMPARISON.md](docs/ORIGINAL_WORKFLOW_COMPARISON.md).
 
-Review the new YAML against local settings before replacing it. CFD reference
-wall temperature remains explicit; it does not hold the transient solid at that
-temperature. Confirm freestream direction, heat-flux sign, reference width and
-material parameters on a known case before starting a new batch.
+Review flight direction, explicit heat-flux sign, reference width, tungsten
+properties, radiation and exposure duration on a known case before a batch.
+The current coefficient is spatially varying but fixed as the solid warms;
+wall-temperature dependence and a changing flight envelope require additional
+calibration rather than a guessed correction.

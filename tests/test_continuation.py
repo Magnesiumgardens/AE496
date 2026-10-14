@@ -31,6 +31,10 @@ class ContinuationTests(unittest.TestCase):
         self.path=self.work/'_batch/config.yaml';self.path.parent.mkdir()
         geometry=self.root/'nose.x_t';geometry.write_text('CAD fixture')
         cfg=yaml.safe_load((ROOT/'config.yaml').read_text())
+        cfg.pop('workflow',None);cfg.pop('thermal_export',None)
+        cfg['thermal']={'mode':'adiabatic'}
+        cfg['solver'].update(initialization='freestream',courant_number=.1,
+                             flow_scheme='first-order-upwind',residual_thresholds={'energy':1e-6})
         cfg['project']=dict(name='nose',work_dir=str(self.work));cfg['geometry']['input_file']=str(geometry)
         self.path.write_text(yaml.safe_dump(cfg));self.cfg=load_config(self.path)
         for name in ('02_mesh.msh.h5','04_final.cas.h5','04_final.dat.h5'):(self.work/name).write_bytes(('old '+name).encode())

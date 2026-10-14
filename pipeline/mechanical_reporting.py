@@ -2,6 +2,7 @@
 from pathlib import Path
 
 from .reporting import read_json, load_yaml, build_result_row, create_comparison_outputs
+from .thermal_loading import ThermalAnalysisError
 from .utils import file_sha256
 
 
@@ -10,15 +11,26 @@ def mechanical_complete(work, cfg):
         from .gas_reporting import temperature_complete
         from .solution_quality import saved_quality
         from .temperature_export import temperature_paths
+        work = Path(work)
         summary = read_json(work / "thermal_analysis/thermal_summary.json")
-        if summary.get("model_version") != "3.0-temperature-convection" or summary.get("status") != "complete":return False
-        if not temperature_complete(cfg) or saved_quality(cfg)["status"] != "residual_screen_passed":return False
+        endpoint = cfg.get("workflow", {}).get("strategy") == "two_endpoint"
+        model = "4.0-endpoint-convection" if endpoint else "3.0-temperature-convection"
+        if summary.get("model_version") != model or summary.get("status") != "complete":return False
         if file_sha256(summary["thermal_config_path"]) != summary["thermal_config_sha256"]:return False
-        if summary["source_sha256"] != {"final_case":file_sha256(work/"04_final.cas.h5"),
-                                         "final_data":file_sha256(work/"04_final.dat.h5")}:return False
-        if file_sha256(temperature_paths(cfg)[0].parent/"wall_temperature_nodes.csv") != summary["boundary_csv_sha256"]:return False
+        if endpoint:
+            from .endpoint_loading import verify_convection_package, convection_paths
+            boundary, metadata = verify_convection_package(cfg)
+            if summary.get("source_sha256") != metadata["source_sha256"]:return False
+            if summary.get("convection_package_sha256") != file_sha256(convection_paths(cfg)[1]):return False
+            if summary.get("convection_conditions") != metadata["conditions"]:return False
+        else:
+            if not temperature_complete(cfg) or saved_quality(cfg)["status"] != "residual_screen_passed":return False
+            if summary["source_sha256"] != {"final_case":file_sha256(work/"04_final.cas.h5"),
+                                             "final_data":file_sha256(work/"04_final.dat.h5")}:return False
+            boundary = temperature_paths(cfg)[0].parent/"wall_temperature_nodes.csv"
+        if file_sha256(boundary) != summary["boundary_csv_sha256"]:return False
         return all(file_sha256(work/"thermal_analysis"/name) == digest for name,digest in summary["result_sha256"].items())
-    except (OSError, ValueError, KeyError, TypeError):return False
+    except (OSError, ValueError, KeyError, TypeError, ThermalAnalysisError):return False
 
 
 def create_mechanical_reports(runs_dir, output_dir):

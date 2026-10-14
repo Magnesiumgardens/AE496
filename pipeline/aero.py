@@ -127,8 +127,9 @@ def setting_scalar(value):
 def validate_saved_conditions(solver, cfg):
     """Check saved physical conditions before relabeling an existing CFD result."""
     setup = solver.settings.setup
-    if cfg["thermal"] != {"mode": "adiabatic"}:
-        raise ValueError("Saved-result export requires an adiabatic configuration")
+    mode = cfg["thermal"].get("mode")
+    if mode not in ("adiabatic", "fixed_temperature"):
+        raise ValueError("Saved-result export requires a supported endpoint configuration")
     if not setup.models.energy.enabled.get_state():
         raise ValueError("Saved case has no fluid energy equation; rerun CFD")
     if str(setup.models.radiation.model.get_state()).casefold() != "none":
@@ -145,6 +146,7 @@ def validate_saved_conditions(solver, cfg):
             raise ValueError(f"Saved case {name}={actual} differs from requested {expected}; rerun CFD")
 
     operating = setup.general.operating_conditions.operating_pressure.get_state()
+    check("operating pressure", operating, cfg["physics"].get("operating_pressure_pa",0.0))
     for zone in zones:
         far = farfields[zone]
         check("Mach", far.momentum.mach_number.get_state(), state["mach"])
@@ -182,9 +184,13 @@ def validate_saved_conditions(solver, cfg):
     for name in zones:
         thermal = walls[name].thermal
         condition = thermal.thermal_condition.get_state()
-        if str(condition).casefold().replace(" ", "") != "heatflux":
-            raise ValueError("Saved case is not an adiabatic heat-flux wall; rerun CFD")
-        check("wall heat flux", thermal.heat_flux.get_state(), 0.0)
+        expected_condition = "heatflux" if mode == "adiabatic" else "temperature"
+        if str(condition).casefold().replace(" ", "") != expected_condition:
+            raise ValueError(f"Saved wall condition differs from the {mode} endpoint; rerun CFD")
+        if mode == "adiabatic":
+            check("wall heat flux", thermal.heat_flux.get_state(), 0.0)
+        else:
+            check("cold wall temperature", thermal.temperature.get_state(), cfg["thermal"]["wall_temperature_k"])
 
 
 def aerodynamic_summary(solver, cfg, wall_zones):

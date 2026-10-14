@@ -17,6 +17,7 @@ from .thermal_loading import (
 from .trade_study import thermal_screening_metrics
 
 MODEL_VERSION = "3.0-temperature-convection"
+ENDPOINT_MODEL_VERSION = "4.0-endpoint-convection"
 STEFAN_BOLTZMANN = 5.670374419e-8
 
 
@@ -76,7 +77,7 @@ def wall_rows(time, load, wall_temperature, nnum, indices, distances, settings):
         settings["emissivity"] * STEFAN_BOLTZMANN * (wall_temperature**4 - settings["trad"]**4)
         if settings["include_rad"] else np.zeros(len(load.xy))
     )
-    return [
+    rows = [
         {
             "time_s": float(time), "surface_order_index": index,
             "x_m": float(point[0]), "y_m": float(point[1]),
@@ -89,6 +90,12 @@ def wall_rows(time, load, wall_temperature, nnum, indices, distances, settings):
         }
         for index, point in enumerate(load.xy)
     ]
+    if load.mode == "convection":
+        coefficient = np.broadcast_to(np.asarray(load.coefficient), (len(load.xy),))
+        for index, row in enumerate(rows):
+            row.update(recovery_temperature_K=float(load.gas_temperature[index]),
+                       heat_transfer_coefficient_W_m2K=float(coefficient[index]))
+    return rows
 
 
 def write_csv(path, rows):
@@ -156,10 +163,11 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
 
 
 def apply_surface_loads(mapdl, lines, load, settings):
+    coefficients = np.broadcast_to(np.asarray(load.coefficient), (len(load.xy),)) if load.mode == "convection" else None
     for index, line in enumerate(lines):
         next_index = (index + 1) % len(lines)
         if load.mode == "convection":
-            mapdl.sfl(line, "CONV", load.coefficient, load.coefficient,
+            mapdl.sfl(line, "CONV", float(coefficients[index]), float(coefficients[next_index]),
                       float(load.gas_temperature[index]), float(load.gas_temperature[next_index]))
         else:  # Historical direct-flux utilities, never selected by the new runner.
             mapdl.sfl(line, "HFLUX", float(load.cold_flux[index]), float(load.cold_flux[next_index]))
@@ -237,18 +245,29 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
     work = Path(cfg["project"]["work_dir"])
     if run_dir is not None and Path(run_dir).resolve() != work:
         raise ThermalAnalysisError("--run-dir disagrees with the selected CFD config")
-    quality = require_usable_solution(cfg)
-    if quality["status"] != "residual_screen_passed":
-        raise ThermalAnalysisError("Mechanical requires a CFD residual screen with no final temperature/pressure limiting.")
-    if not temperature_complete(cfg):
-        raise ThermalAnalysisError("Temperature export is missing or stale; rerun study.py export first.")
-    metadata = json.loads(temperature_paths(cfg)[1].read_text())
-    node_metadata = metadata.get("wall_nodes", {})
-    boundary = temperature_paths(cfg)[0].parent / "wall_temperature_nodes.csv"
-    if not boundary.is_file():raise ThermalAnalysisError("Missing wall-node temperatures; rerun CFD export.")
-    if node_metadata.get("csv_sha256") != file_sha256(boundary):
-        raise ThermalAnalysisError("CFD boundary-node temperature CSV is missing or modified; rerun export.")
-    load = read_load(boundary, settings["h"])
+    endpoint = cfg.get("workflow", {}).get("strategy") == "two_endpoint"
+    if endpoint:
+        from .endpoint_loading import verify_convection_package, convection_paths
+        boundary, metadata = verify_convection_package(cfg)
+        actual_minimum = metadata["diagnostics"]["minimum_absolute_delta_temperature_K"]
+        if actual_minimum < settings["min_delta_temperature_k"]:
+            raise ThermalAnalysisError("Endpoint temperature separation is below loading.min_delta_temperature_k; "
+                                       "the coefficient is not identifiable at the requested tolerance")
+        load = read_load(boundary)
+        package_sha256 = file_sha256(convection_paths(cfg)[1])
+    else:
+        quality = require_usable_solution(cfg)
+        if quality["status"] != "residual_screen_passed":
+            raise ThermalAnalysisError("Mechanical requires a CFD residual screen with no final temperature/pressure limiting.")
+        if not temperature_complete(cfg):
+            raise ThermalAnalysisError("Temperature export is missing or stale; rerun study.py export first.")
+        metadata = json.loads(temperature_paths(cfg)[1].read_text())
+        node_metadata = metadata.get("wall_nodes", {})
+        boundary = temperature_paths(cfg)[0].parent / "wall_temperature_nodes.csv"
+        if not boundary.is_file():raise ThermalAnalysisError("Missing wall-node temperatures; rerun CFD export.")
+        if node_metadata.get("csv_sha256") != file_sha256(boundary):
+            raise ThermalAnalysisError("CFD boundary-node temperature CSV is missing or modified; rerun export.")
+        load = read_load(boundary, settings["h"])
     mesh_size = auto_mesh_size(load.xy, ta_cfg.get("mesh_size_m"))
     output = work / "thermal_analysis"
     output.mkdir(parents=True, exist_ok=True)
@@ -263,7 +282,11 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         viz = dict(ta_cfg.get("visualization",{}), save_heat_flux_image=False)
         from .reporting import create_thermal_visualizations
         figures = create_thermal_visualizations(output,load.xy,np.zeros(len(load.xy)),xyz,history,snapshots,viz)
-        summary = dict(status="complete", model_version=MODEL_VERSION, loading_mode="convection",
+        loading_limits = (["Steady matched CFD endpoints define spatial h and recovery temperature; both remain fixed throughout exposure.",
+                           "The derived h is calibrated at the cold-wall temperature; wall-temperature dependence requires further calibration."] if endpoint else
+                          ["Constant steady CFD recovery temperature and specified uniform h throughout exposure."])
+        summary = dict(status="complete", model_version=ENDPOINT_MODEL_VERSION if endpoint else MODEL_VERSION,
+            loading_mode="convective_from_cfd" if endpoint else "convection",
             backend="Mechanical APDL", material=ta_cfg["material"], analysis={**ta_cfg["transient"], "initial_temperature_k":settings["initial_t"]},
             thermal_config_path=str(Path(thermal_config).resolve()), thermal_config_sha256=file_sha256(thermal_config),
             result_sha256={name:file_sha256(output/name) for name in ("wall_temperature_history.csv", "thermal_nodes_final.csv", "temperature_history.csv")},
@@ -271,12 +294,20 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
             source_sha256=metadata["source_sha256"], final_temperature=final,
             thermal_mesh=dict(nodes=len(nnum),elements=n_elements,size_m=mesh_size),
             net_heat_load_per_unit_span_J_m=net_heat, visualization_settings=viz, figures=figures,
-            limitations=["Constant steady CFD recovery temperature and specified uniform h throughout exposure.",
+            limitations=[*loading_limits,
                          "Constant tungsten properties; no ablation, structural response or temperature dependence.",
                          "Reconstructed planar solid, unit out-of-plane thickness; not a full 3-D vehicle.",
                          "Adiabatic CFD is one-way coupled; heating does not feed back into the gas solution."])
+        if endpoint:
+            summary.update(convection_package_sha256=package_sha256,
+                           convection_conditions=metadata["conditions"],
+                           convection_derivation=metadata["derivation"],
+                           convection_diagnostics=metadata["diagnostics"],
+                           convection_package_model_version=metadata["model_version"])
         atomic_json(output/"thermal_summary.json",summary)
-        print(f"[thermal] Complete: {output}; duration={settings['duration']:g} s; h={settings['h']:g} W/(m² K)")
+        coefficient_description = (f"spatial h={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g}" if endpoint
+                                   else f"h={settings['h']:g}")
+        print(f"[thermal] Complete: {output}; duration={settings['duration']:g} s; {coefficient_description} W/(m² K)")
         return summary
     finally:
         mapdl.exit()

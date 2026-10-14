@@ -53,7 +53,10 @@ def order_segments(records, tolerance=1e-9):
         available = [i for i in adjacency[current] if i not in used]
         if not available:
             raise ValueError("Body-wall zones contain disconnected loops")
-        i = min(available)
+        # A saved parallel case can enumerate faces differently. Pick the
+        # neighboring vertex geometrically so both endpoints walk the loop in
+        # the same direction independent of native face indices.
+        i = min(available, key=lambda edge: endpoints[edge][1] if endpoints[edge][0] == current else endpoints[edge][0])
         used.add(i)
         ordered.append(records[i])
         left, right = endpoints[i]

@@ -387,6 +387,13 @@ def _source_wall_plots(records, directory):
         ax.set(xlabel="x [m]", ylabel="y [m]", title=f"Saved Surface Heat Flux (t={time:g} s)")
         ax.set_aspect("equal", adjustable="box")
         _save(fig, directory / "final_wall_heat_flux_map.png", plt)
+        distance = np.r_[0,np.cumsum(np.linalg.norm(np.diff(xy,axis=0),axis=1))]
+        fig, ax = plt.subplots(figsize=(9,4))
+        ax.plot(distance,q)
+        ax.set(xlabel="Distance along saved wall order [m]",ylabel="Heat flux into wall [W/m²]",
+               title=f"Saved Surface Heat Flux (t={time:g} s)")
+        ax.grid(alpha=.3)
+        _save(fig,directory/"final_wall_heat_flux_profile.png",plt)
 
 
 def create_thermal_visualizations(output_dir, boundary_xy, boundary_q, xyz, history, snapshots, viz_cfg):

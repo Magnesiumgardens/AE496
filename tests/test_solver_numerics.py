@@ -28,6 +28,10 @@ class ServerDictionary:
 class SolverNumericsTests(unittest.TestCase):
     def setUp(self):
         self.cfg=yaml.safe_load((Path(__file__).resolve().parents[1]/'config.yaml').read_text())
+        self.cfg.pop('workflow',None);self.cfg.pop('thermal_export',None)
+        self.cfg['thermal']={'mode':'adiabatic'}
+        self.cfg['solver'].update(initialization='freestream',courant_number=.1,
+                                 flow_scheme='first-order-upwind',residual_thresholds={'energy':1e-6})
         self.schemes=ServerDictionary({'amg-c':'second-order-upwind'},
                                      {'amg-c':['first-order-upwind','second-order-upwind']})
         self.defaults=ServerDictionary({'pressure':0.,'temperature':300.,'x-velocity':0.,'y-velocity':0.})

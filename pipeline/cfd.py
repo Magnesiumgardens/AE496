@@ -22,6 +22,18 @@ def launch_solver(cfg, log_subdir="solver_logs"):
 
 
 def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
+    endpoint = cfg.get("workflow",{}).get("strategy") == "two_endpoint"
+    if endpoint and not cfg.get("_endpoint_kind"):
+        from .endpoint_workflow import effective_cfg
+        if inspect:return export_saved_case(effective_cfg(cfg,"adiabatic"),inspect=True)
+        result = {}
+        if thermal:
+            result["cold_wall"] = export_saved_case(effective_cfg(cfg,"cold_wall"),thermal=False,aero=False)
+        result.update(export_saved_case(effective_cfg(cfg,"adiabatic"),thermal=thermal,aero=aero))
+        if thermal:
+            from .endpoint_loading import build_convection_package
+            result["convection"] = build_convection_package(cfg)
+        return result
     paths = work_paths(cfg)
     for key in ("final_case", "final_data"):
         path = paths[key]
@@ -33,7 +45,9 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         reference_state(cfg)
     if not inspect:
         from .solution_quality import require_usable_solution
-        require_usable_solution(cfg)
+        quality = require_usable_solution(cfg)
+        if endpoint and quality.get("status") != "residual_screen_passed":
+            raise ValueError("Endpoint exports require a matching passed residual screen")
     solver = launch_solver(cfg, "export_logs")
     try:
         solver.settings.file.read_case_data(file_name=str(paths["final_case"]))
@@ -49,6 +63,9 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         walls = [z for z in solver.settings.setup.boundary_conditions.wall.get_object_names()
                  if z == base or z.startswith(base + ".")]
         result = {}
+        if endpoint and (thermal or cfg.get("_endpoint_kind") == "cold_wall"):
+            from .endpoint_export import export_endpoint
+            result["endpoint"] = export_endpoint(solver,cfg,walls)
         if thermal:
             print("[export] Saving adiabatic gas/recovery temperatures...", flush=True)
             result["temperatures"] = export_temperatures(solver, cfg, walls)
@@ -62,10 +79,12 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                 print("[export] Computing body-wall forces from saved solution...", flush=True)
                 result["aerodynamics"] = aerodynamic_summary(solver, cfg, walls)
                 result["aerodynamics"]["source_case"] = str(paths["final_case"])
-                atomic_json(paths["work"] / "aero_summary.json", result["aerodynamics"])
+                result["aerodynamics"]["source_sha256"] = {key:file_sha256(paths[key]) for key in ("final_case","final_data")}
+                destination = Path(cfg.get("_study_work_dir",paths["work"]))
+                atomic_json(destination / "aero_summary.json", result["aerodynamics"])
                 print("[export] Drag:", result["aerodynamics"]["drag_per_unit_span_N_m"], "N/m", flush=True)
             except Exception as exc:
-                atomic_json(paths["work"] / "aero_summary.json", {"status": "failed", "error": str(exc)})
+                atomic_json(Path(cfg.get("_study_work_dir",paths["work"])) / "aero_summary.json", {"status": "failed", "error": str(exc)})
                 print("[export] Aerodynamic export failed; completed temperature exports are retained.", flush=True)
                 raise
         return result

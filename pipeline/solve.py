@@ -49,8 +49,14 @@ def _matching_zone_names(bc, base_name: str) -> list[str]:
     return sorted(set(matches))
 
 def _set_wall_thermal(wall, thermal_cfg: dict) -> dict:
+    if thermal_cfg.get("mode") == "fixed_temperature":
+        temperature = float(thermal_cfg["wall_temperature_k"])
+        wall.thermal.thermal_condition = "Temperature"
+        wall.thermal.temperature.option = "value"
+        wall.thermal.temperature.value = temperature
+        return {"thermal_condition": "Temperature", "wall_temperature_k": temperature}
     if thermal_cfg != {"mode": "adiabatic"}:
-        raise SolverPipelineError("This study requires an adiabatic wall with no thermal loading")
+        raise SolverPipelineError("Use fixed_temperature for the cold endpoint or adiabatic for its reference")
     wall.thermal.thermal_condition = "Heat Flux"
     wall.thermal.heat_flux.option = "value"
     wall.thermal.heat_flux.value = 0.0
@@ -83,7 +89,7 @@ def _iterate_with_temperature_history(solver, cfg, wall_names):
     return iterate_with_history(solver, cfg, wall_names)
 
 
-def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
+def solve_case(cfg: dict, mesh_file: str | Path, *, reference_cfg: dict | None = None) -> dict:
     paths = work_paths(cfg)
 
     # Use absolute paths because Fluent will run from ./logs.
@@ -96,12 +102,35 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
     from .temperature_export import temperature_conditions
     summary = {"source_conditions":temperature_conditions(cfg), "source_mesh_sha256":file_sha256(mesh_file),
                "source_geometry_sha256":file_sha256(cfg["geometry"]["input_file"])}
+    if reference_cfg is not None:
+        from .solution_quality import require_usable_solution
+        quality = require_usable_solution(reference_cfg)
+        if quality.get("status") != "residual_screen_passed":
+            raise SolverPipelineError("Cold-wall reference must pass the residual screen before warm-starting")
+        reference = work_paths(reference_cfg)
+        metadata = json.loads(reference["summary"].read_text(encoding="utf-8"))
+        if metadata.get("source_mesh_sha256") != summary["source_mesh_sha256"]:
+            raise SolverPipelineError("The reference must use this exact mesh")
+        if metadata.get("source_geometry_sha256") != summary["source_geometry_sha256"]:
+            raise SolverPipelineError("The reference must use this exact CAD geometry")
+        if cfg["thermal"] != {"mode": "adiabatic"} or reference_cfg["thermal"].get("mode") != "fixed_temperature":
+            raise SolverPipelineError("Warm reference requires a cold-wall solution and an adiabatic target")
+        conditions = temperature_conditions(reference_cfg)
+        if {k:v for k,v in conditions.items() if k != "thermal"} != {k:v for k,v in summary["source_conditions"].items() if k != "thermal"}:
+            raise SolverPipelineError("Endpoint gas physics, flight conditions and mesh settings must match")
+        summary["reference_source_sha256"] = {key:file_sha256(reference[key]) for key in ("final_case", "final_data")}
     print("[solve] Launching 2-D double-precision Fluent solver...")
     solver = launch_solver(cfg)
 
     try:
-        print(f"[solve] Reading 2-D mesh: {mesh_file}")
-        solver.settings.file.read_mesh(file_name=str(mesh_file))
+        if reference_cfg is None:
+            print(f"[solve] Reading 2-D mesh: {mesh_file}")
+            solver.settings.file.read_mesh(file_name=str(mesh_file))
+        else:
+            from .aero import validate_saved_conditions
+            print(f"[solve] Warm-starting adiabatic reference: {reference['final_case']}", flush=True)
+            solver.settings.file.read_case_data(file_name=str(reference["final_case"]))
+            validate_saved_conditions(solver, reference_cfg)
 
         print("[solve] Checking mesh...")
         solver.tui.mesh.check()
@@ -207,7 +236,7 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
                 cfg["thermal"],
             )
 
-        summary["thermal_mode"] = "adiabatic"
+        summary["thermal_mode"] = cfg["thermal"]["mode"]
         summary["wall_thermal_setup"] = wall_thermal_setup
         summary["body_wall_zones"] = wall_zones
         summary["farfield_zones"] = far_zones
@@ -217,7 +246,8 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
         from .solver_numerics import configure_numerics, initialize_flow, configure_residual_criteria
         summary["numerics"] = configure_numerics(solver,cfg)
         summary["residual_criteria"] = configure_residual_criteria(solver,cfg)
-        summary["initialization"] = initialize_flow(solver,cfg,far_zones[0])
+        summary["initialization"] = (initialize_flow(solver,cfg,far_zones[0]) if reference_cfg is None
+                                     else {"method": "warm_start_cold_wall", "initialization_performed": False})
 
         print(f"[solve] Writing setup case: {paths['setup_case']}")
         solver.settings.file.write(file_name=str(paths["setup_case"]), file_type="case")

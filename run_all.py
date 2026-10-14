@@ -13,6 +13,10 @@ def main():
     parser.add_argument("--stop-after", choices=("geometry", "mesh", "solve"), default="solve")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if cfg.get("workflow",{}).get("strategy") == "two_endpoint" and args.stop_after != "geometry":
+        from pipeline.study import run_case
+        print(run_case(args.config,stop_after="mesh" if args.stop_after == "mesh" else "cold_wall"))
+        return
     print(f"Project: {cfg['project']['name']}")
     print(f"Work directory: {cfg['project']['work_dir']}")
     geometry = prepare_geometry(cfg)

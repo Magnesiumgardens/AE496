@@ -4,7 +4,7 @@ import argparse
 
 from pipeline.reporting import (build_result_row, create_comparison_outputs,
                                 load_yaml, read_json, save_batch_summary)
-from pipeline.trade_study import aero_complete
+from pipeline.gas_reporting import aero_complete_for_report
 
 
 def compare(runs_dir, output_dir, reference_dir=None):
@@ -25,7 +25,7 @@ def compare(runs_dir, output_dir, reference_dir=None):
         cfg = load_yaml(config_path)
         thermal = read_json(directory / "thermal_analysis/thermal_summary.json")
         try:
-            fresh = aero_complete(directory, cfg)
+            fresh = aero_complete_for_report(cfg)
         except (ValueError, KeyError):
             fresh = False
         status = "complete" if fresh and thermal.get("status") == "complete" else "incomplete"

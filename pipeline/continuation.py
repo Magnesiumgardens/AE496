@@ -40,24 +40,34 @@ def source_hashes(work):
 def preflight(cfg):
     from .study import BatchError, stage_files, stage_fingerprint
     work = work_paths(cfg)["work"]
+    mesh = Path(cfg.get("_study_work_dir",work))/"02_mesh.msh.h5"
     if not cfg["solver"].get("run_iterations",True):raise BatchError("Continuation requires solver.run_iterations=true")
-    for name in ("02_mesh.msh.h5","04_final.cas.h5","04_final.dat.h5"):
-        if not (work/name).is_file() or (work/name).stat().st_size == 0:
-            raise BatchError(f"Continuation requires a nonempty saved mesh/case/data: {work/name}")
+    for path in (mesh,work/"04_final.cas.h5",work/"04_final.dat.h5"):
+        if not path.is_file() or path.stat().st_size == 0:
+            raise BatchError(f"Continuation requires a nonempty saved mesh/case/data: {path}")
     summary = read_json(work/"summary.json")
     source = source_hashes(work)
     quality = summary.get("numerical_quality",{})
     recorded_source = quality.get("source_sha256",summary.get("temperature_history",{}).get("source_sha256"))
-    if recorded_source != source or summary.get("thermal_mode") != "adiabatic":
+    if recorded_source != source or summary.get("thermal_mode") != cfg["thermal"]["mode"]:
         raise BatchError("Saved CFD provenance is missing or changed; cannot safely continue this case")
     if quality.get("recent_temperature_or_pressure_limiting"):
         raise BatchError("Saved flow still has temperature/pressure limiting; stabilize a fresh solve before continuing")
+    if cfg.get("_endpoint_kind") == "adiabatic":
+        cold = Path(cfg["_study_work_dir"]) / "cfd/cold_wall"
+        try:
+            reference = source_hashes(cold)
+        except OSError as exc:
+            raise BatchError("The current cold-wall reference checkpoint is missing; rebuild the adiabatic endpoint") from exc
+        if summary.get("reference_source_sha256") != reference:
+            raise BatchError("Saved adiabatic flow does not match the current cold-wall reference checkpoint; "
+                             "rebuild the adiabatic endpoint before continuing")
     state = read_json(work/"_batch/stage_state.json")
     record = state.get("stages",{}).get("solver",{})
     context_matches = (summary.get("source_conditions") == temperature_conditions(cfg)
-                       and summary.get("source_mesh_sha256") == file_sha256(work/"02_mesh.msh.h5")
+                       and summary.get("source_mesh_sha256") == file_sha256(mesh)
                        and summary.get("source_geometry_sha256") == file_sha256(cfg["geometry"]["input_file"]))
-    if not context_matches and record.get("fingerprint") != stage_fingerprint("solver",cfg,{},stage_files(work,cfg)):
+    if not context_matches and (cfg.get("_endpoint_kind") or record.get("fingerprint") != stage_fingerprint("solver",cfg,{},stage_files(work,cfg))):
         raise BatchError("Saved solution settings/mesh do not match this config; continuation would use a different case")
     return summary, state
 
@@ -65,6 +75,7 @@ def preflight(cfg):
 def continue_solver(cfg, iterations, output_dir):
     """Write to a new directory, keeping the original solution intact on errors."""
     original = work_paths(cfg)["work"]
+    if cfg.get("_endpoint_kind"):preflight(cfg)
     output = Path(output_dir).resolve()
     output.relative_to(original)  # this operation owns only files inside this case
     if (output/"04_final.cas.h5").exists() or (output/"04_final.dat.h5").exists():
@@ -99,7 +110,7 @@ def continue_solver(cfg, iterations, output_dir):
         summary.pop("numerical_quality",None)
         summary.update(solution_status="additional_iterations_completed", convergence_status="not_verified",
                        source_conditions=temperature_conditions(cfg),
-                       source_mesh_sha256=file_sha256(original/"02_mesh.msh.h5"),
+                       source_mesh_sha256=file_sha256(Path(cfg.get("_study_work_dir",original))/"02_mesh.msh.h5"),
                        source_geometry_sha256=file_sha256(cfg["geometry"]["input_file"]),
                        continuation=dict(additional_iteration_budget=int(iterations),
                                          initialization_performed=False, source_sha256=source_hashes(original)))
@@ -132,13 +143,18 @@ def merge_history(original, staged, summary, archive):
         metadata["history_merge_warning"] = str(exc)
 
 
-def continue_case(config_path, iterations=4800, courant=None, *, _runner=None):
+def continue_case(config_path, iterations=4800, courant=None, *, _runner=None, endpoint="cold_wall"):
     from .config import load_config
     from .solution_quality import assess_log, save_diagnostics
     from .study import (BatchError, REPO_ROOT, _save_state, _archive_stage, run_stage,
                         stage_files, stage_fingerprint, output_hashes)
     config_path = Path(config_path).resolve()
     cfg = load_config(config_path)
+    two_endpoint = cfg.get("workflow",{}).get("strategy") == "two_endpoint"
+    root_cfg = cfg
+    if two_endpoint:
+        from .endpoint_workflow import effective_cfg
+        cfg = effective_cfg(root_cfg,endpoint)
     if isinstance(iterations,bool) or int(iterations) != iterations or iterations <= 0:
         raise BatchError("Additional iterations must be a positive integer")
     _, state = preflight(cfg)
@@ -158,21 +174,28 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None):
         from .config import positive
         positive("courant",courant)
         raw = yaml.safe_load(config_path.read_text())
-        raw["solver"]["courant_number"] = float(courant)
+        if two_endpoint:raw.setdefault("workflow",{}).setdefault(endpoint+"_solver",{})["courant_number"] = float(courant)
+        else:raw["solver"]["courant_number"] = float(courant)
         config_path.write_text(yaml.safe_dump(raw,sort_keys=False),encoding="utf-8")
-        cfg = load_config(config_path)
+        root_cfg = load_config(config_path)
+        cfg = effective_cfg(root_cfg,endpoint) if two_endpoint else root_cfg
+    runner_config = config_path
+    if two_endpoint:
+        runner_config = work/"_batch/config.yaml"
+        runner_config.parent.mkdir(parents=True,exist_ok=True)
+        runner_config.write_text(yaml.safe_dump(cfg,sort_keys=False),encoding="utf-8")
     staged = work/"_continuation"/stamp
     staged.mkdir(parents=True)
     runner = _runner or run_stage
     print(f"[continue] Previous solution retained: {archive}",flush=True)
     try:
-        runner([sys.executable,"-u",str(REPO_ROOT/"run_solver_only.py"),"--config",str(config_path),
+        runner([sys.executable,"-u",str(REPO_ROOT/"run_solver_only.py"),"--config",str(runner_config),
                 "--continue-saved","--iterations",str(int(iterations)),"--output-dir",str(staged)],
                staged/"solver.log",hard_timeout_s=7200,inactivity_timeout_s=1200)
         for name in ("04_final.cas.h5","04_final.dat.h5","summary.json"):
             if not (staged/name).is_file() or (staged/name).stat().st_size == 0:
                 raise BatchError(f"Continuation produced no usable {name}; previous solution retained")
-        if read_json(staged/"summary.json").get("thermal_mode") != "adiabatic":
+        if read_json(staged/"summary.json").get("thermal_mode") != cfg["thermal"]["mode"]:
             raise BatchError("Continuation summary is invalid; previous solution retained")
     except Exception:
         if courant is not None:shutil.copy2(archive/"source_config.yaml",config_path)
@@ -181,7 +204,7 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None):
     quality = assess_log(staged/"solver.log",cfg)
     quality["source_sha256"] = source_hashes(staged)
     summary.update(numerical_quality=quality,convergence_status=quality["status"])
-    if quality["numerical_state"] == "unstable":
+    if quality.get("numerical_state") == "unstable" or quality.get("status") == "not_verified":
         atomic_json(staged/"summary.json",summary)
         if courant is not None:shutil.copy2(archive/"source_config.yaml",config_path)
         diagnostic_cfg = copy.deepcopy(cfg)
@@ -217,13 +240,36 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None):
         if courant is not None:shutil.copy2(archive/"source_config.yaml",config_path)
         raise
     # Invalidate downstream products only after a new complete pair is saved.
-    for stage in ("temperature_export","aero"):
-        _archive_stage(stage,work,cfg,state)
-    files = stage_files(work,cfg)
-    state["stages"]["solver"] = dict(status="complete" if quality["status"] == "residual_screen_passed" else "failed",
-        fingerprint=stage_fingerprint("solver",cfg,{},files),output_sha256=output_hashes(files["solver"]),
+    pending_archives = []
+    if two_endpoint:
+        from .endpoint_workflow import archive as archive_endpoint, stage_files as endpoint_files, fingerprint
+        root = Path(root_cfg["project"]["work_dir"])
+        state = read_json(root/"_batch/stage_state.json") or {"version":3,"strategy":"two_endpoint","stages":{}}
+        state.setdefault("stages",{})
+        pending_archives = ["cold_export","adiabatic"] if endpoint == "cold_wall" else ["adiabatic_export","aero"]
+        from .endpoint_workflow import downstream
+        for stage in pending_archives:
+            for name in downstream(stage):state["stages"][name] = {"status":"stale","reason":f"{endpoint} continued"}
+        files = endpoint_files(root_cfg)
+        stage_name = endpoint
+        signature = fingerprint(endpoint,root_cfg,{},files)
+        state_path = root/"_batch/stage_state.json"
+    else:
+        for stage in ("temperature_export","aero"):_archive_stage(stage,work,cfg,state)
+        files = stage_files(work,cfg)
+        stage_name = "solver"
+        signature = stage_fingerprint("solver",cfg,{},files)
+        state_path = work/"_batch/stage_state.json"
+    state["stages"][stage_name] = dict(status="complete" if quality["status"] == "residual_screen_passed" else "failed",
+        fingerprint=signature,output_sha256=output_hashes(files[stage_name]),
         provenance="continued_saved_solution", numerical_quality=quality["status"])
-    _save_state(work/"_batch/stage_state.json",state)
+    _save_state(state_path,state)
+    # Persist the reusable checkpoint and stale child records before moving
+    # any export files. A locked Windows output must not trigger a fresh solve
+    # of an already promoted, screened continuation on the next study run.
+    for stage in pending_archives:
+        try:archive_endpoint(stage,root_cfg,state)
+        finally:_save_state(state_path,state)
     save_diagnostics(work/"batch_logs/solver.log",cfg)
     return dict(case=cfg["project"]["name"],status="complete" if quality["status"] == "residual_screen_passed" else "not_converged",
-                numerical_quality=quality, archive=str(archive),work_dir=str(work),diagnostics=str(work/"solver_diagnostics"))
+                numerical_quality=quality, archive=str(archive),work_dir=str(root_cfg["project"]["work_dir"]),diagnostics=str(work/"solver_diagnostics"))

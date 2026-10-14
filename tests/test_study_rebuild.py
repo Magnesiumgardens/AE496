@@ -21,6 +21,10 @@ class StudyResumeTests(unittest.TestCase):
         self.geometry.write_text("original geometry")
         self.config = self.root / "case.yaml"
         self.cfg = yaml.safe_load((REPO_ROOT / "config.yaml").read_text())
+        self.cfg.pop("workflow", None);self.cfg.pop("thermal_export", None)
+        self.cfg["thermal"] = {"mode":"adiabatic"}
+        self.cfg["solver"].update(initialization="freestream",courant_number=.1,
+                                 flow_scheme="first-order-upwind",residual_thresholds={"energy":1e-6})
         self.cfg["runtime"]["meshing_release_delay_s"] = 0
         self.cfg["project"] = dict(name="nose", work_dir=str(self.work))
         self.cfg["geometry"]["input_file"] = str(self.geometry)
@@ -141,6 +145,8 @@ class StudyResumeTests(unittest.TestCase):
 
     def test_changing_h_reuses_cfd_and_reruns_only_mechanical(self):
         self.thermal_cfg = yaml.safe_load((REPO_ROOT / "thermal_analysis.yaml").read_text())
+        self.thermal_cfg["loading"] = {"mode":"convection", "heat_transfer_coefficient_w_m2k":None}
+        self.thermal_cfg["include_radiation"] = False
         self.thermal_cfg["loading"]["heat_transfer_coefficient_w_m2k"] = 42
         self.write_configs()
         def runner(command,log_path,**kwargs):

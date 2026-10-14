@@ -13,6 +13,11 @@ def main():
     parser.add_argument("--output-dir")
     args = parser.parse_args()
     cfg = load_config(args.config)
+    if cfg.get("workflow",{}).get("strategy") == "two_endpoint" and not cfg.get("_endpoint_kind"):
+        if args.continue_saved:parser.error("Use study.py continue --config <case.yaml> --endpoint cold_wall|adiabatic")
+        from pipeline.study import run_case
+        print(run_case(args.config,stop_after="cold_wall"))
+        return
     if args.continue_saved:
         if not args.iterations or args.iterations <= 0 or not args.output_dir:parser.error("Continuation needs positive --iterations and --output-dir")
         from pipeline.continuation import continue_solver

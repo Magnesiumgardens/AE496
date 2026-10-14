@@ -22,6 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 class ConvectionTests(unittest.TestCase):
     def test_h_is_required_and_duration_is_configurable(self):
         cfg = yaml.safe_load((ROOT/'thermal_analysis.yaml').read_text())
+        cfg['loading']={'mode':'convection','heat_transfer_coefficient_w_m2k':None}
+        cfg['include_radiation']=False
         cfd = {'thermal':{'mode':'adiabatic'}}
         for value in (None,0,-1,float('nan')):
             cfg['loading']['heat_transfer_coefficient_w_m2k']=value
@@ -56,6 +58,8 @@ class ConvectionTests(unittest.TestCase):
             xy=np.array([[0.,0.],[1.,0.],[0.,1.]])
             load=ConvectionLoad(xy,np.array([1000.,1200.,1400.]),42)
             cfg=yaml.safe_load((ROOT/'thermal_analysis.yaml').read_text())
+            cfg['loading']={'mode':'convection','heat_transfer_coefficient_w_m2k':None}
+            cfg['include_radiation']=False
             cfg['loading']['heat_transfer_coefficient_w_m2k']=42
             cfg['transient']['duration_s']=2
             cfg['transient'].update(initial_time_step_s=1,min_time_step_s=.1,max_time_step_s=2)
@@ -107,6 +111,8 @@ class CompleteSolidTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             ta=yaml.safe_load((ROOT/'thermal_analysis.yaml').read_text())
+            ta['loading']={'mode':'convection','heat_transfer_coefficient_w_m2k':None}
+            ta['include_radiation']=False
             ta['loading']['heat_transfer_coefficient_w_m2k']=42
             ta['transient'].update(duration_s=2,initial_time_step_s=1,min_time_step_s=.1,max_time_step_s=2)
             thermal_path=root/'thermal.yaml';thermal_path.write_text(yaml.safe_dump(ta))
