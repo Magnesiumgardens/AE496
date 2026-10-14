@@ -236,7 +236,7 @@ def _archive_stage(stage, work, cfg, state):
         candidates.extend([work / "01_labeled_geometry.pmdb", work / "geometry_summary.json"])
     if stage in ("mesh", "solver"):
         candidates.extend([work / "03_setup.cas.h5", work / "summary.json", work / "body_wall_heat_flux.csv",
-                           work / "solver_temperature_history.csv", work / "solver_temperature_history.out"])
+                           work / "solver_temperature_history.csv", work / "solver_temperature_history.out", work / "solver_diagnostics"])
     if "temperature_export" in INVALIDATES[stage]:
         from .temperature_export import temperature_paths
         candidates.append(temperature_paths(cfg)[0].parent)
@@ -351,7 +351,7 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                    inactivity_timeout_s=float(timeout.get("inactivity_s", 1200)))
             validate_stage_outputs(stage, files[stage])
             if stage == "solver":
-                from .solution_quality import assess_log
+                from .solution_quality import assess_log, save_diagnostics
                 from .utils import atomic_json
                 quality = assess_log(work / "batch_logs/solver.log",cfg)
                 quality["source_sha256"] = {"final_case":file_hash(files[stage][0]),"final_data":file_hash(files[stage][1])}
@@ -359,6 +359,7 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                 summary["numerical_quality"] = quality
                 summary["convergence_status"] = quality["status"]
                 atomic_json(work/"summary.json",summary)
+                save_diagnostics(work / "batch_logs/solver.log",cfg)
                 if quality["status"] == "failed":
                     raise BatchError("CFD did not converge; saved diagnostic case/data retained. " + "; ".join(quality["reasons"]))
         except Exception as exc:

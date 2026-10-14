@@ -17,6 +17,10 @@ def main():
     thermal.add_argument("--config", required=True)
     thermal.add_argument("--thermal-config", default="thermal_analysis.yaml")
     run.add_argument("--no-resume", action="store_true")
+    continuation = commands.add_parser("continue", help="Continue the saved CFD solution without reinitialization")
+    continuation.add_argument("--config", required=True)
+    continuation.add_argument("--iterations", type=int, default=4800)
+    continuation.add_argument("--courant", type=float, help="Set and save a new Courant number for this case")
     batch = commands.add_parser("batch", help="Run all configured nose geometries sequentially")
     batch.add_argument("--batch-config", default="batch.yaml")
     report = commands.add_parser("report", help="Regenerate per-case and comparison outputs without Ansys")
@@ -40,6 +44,20 @@ def main():
     if args.command == "batch":
         from pipeline.study import main as batch_main
         return batch_main(args.batch_config)
+    if args.command == "continue":
+        from pipeline.continuation import continue_case
+        result = continue_case(args.config,args.iterations,args.courant)
+        print(result)
+        if result["status"] != "complete":
+            print(f"[continue] {result.get("message", "Not converged yet; downstream analysis remains blocked")}. Diagnostics: {result["diagnostics"]}")
+            return 2
+        from pipeline.study import run_case
+        run_case(args.config)
+        from compare_nose_trade import compare
+        from pathlib import Path
+        work = Path(result["work_dir"])
+        compare(work.parent,work.parent/"comparison")
+        return 0
     if args.command == "thermal":
         from pipeline.thermal import run_thermal_analysis
         print(run_thermal_analysis(cfd_config=args.config, thermal_config=args.thermal_config))

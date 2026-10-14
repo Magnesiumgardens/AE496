@@ -119,6 +119,22 @@ The startup defaults use freestream initialization, first-order flow discretizat
 
 The study checks the final residual table and rejects persistent final temperature/pressure limiting. Default screening limits are 1e-3 for flow residuals and 1e-6 for energy. A failed solve keeps its diagnostic case/data but stops downstream export and Mechanical loading. A residual screen is necessary, but it does not establish force/temperature stability or mesh independence. The previously posted run with residuals near 1–4 and repeated 5000 K limiting fails this screen.
 
+## Continue an unconverged but stable CFD solution
+
+`study.py run` starts a new solver field when its solver stage must be regenerated. Increasing the budget and rerunning that command therefore discards the numerical progress of an unconverged case. Use continuation instead:
+
+```powershell
+.\.venv\Scripts\python.exe study.py continue --config ".\runs\blunt_1\_batch\config.yaml" --iterations 4800
+```
+
+This loads the saved case/data, verifies their configuration and hashes, and runs **additional** steady iterations without initialization. It uses the current configured Courant number and flow scheme. For a deliberate increase after stable startup, `--courant 0.3` changes and saves that value in the selected case configuration; the previous config and solution are backed up first.
+
+The prior case/data, solver log and temperature histories remain under `_history/*_continue`. Fluent writes the new case/data to a separate staging folder; an API failure or missing output keeps the previous pair intact. A continued flow with nonfinite residuals or final temperature/pressure limiting is retained as a separate diagnostic candidate; the previous pair and configuration stay active. Compatible measured temperature histories are combined; if native iteration labels reset, segment histories are retained separately rather than inventing iteration offsets.
+
+`solver_diagnostics/residual_history.csv`, `residual_history.png` and `residual_summary.json` are produced even when the convergence screen fails. Failed residual screening blocks temperature/force exports and Mechanical. A continued case which passes the screen resumes the ordinary export/report stages automatically. Continued physical-time calculations are not performed in Fluent.
+
+For the supplied 1200-iteration blunt_1 run, the final residuals remain too high, but the last 300-iteration medians are below the preceding 300-iteration medians and no limiting is present. More steady iterations are a justified next experiment, not evidence that the result has converged. If residuals plateau or limiting returns, inspect the reported mesh quality and shock/boundary-layer resolution before increasing the budget again. Higher-order discretization and mesh-independence checks remain necessary after a first-order baseline stabilizes.
+
 ## Data and plots
 
 Each nose has one directory:

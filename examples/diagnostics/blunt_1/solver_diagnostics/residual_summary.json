@@ -1,0 +1,42 @@
+{
+  "numerical_state": "not_converged",
+  "residual_trend": {
+    "continuity": {
+      "previous_window_median": 0.21038,
+      "last_window_median": 0.143005,
+      "last_to_previous_ratio": 0.6797461735906454,
+      "window_samples": 300
+    },
+    "x-velocity": {
+      "previous_window_median": 0.0519805,
+      "last_window_median": 0.0328185,
+      "last_to_previous_ratio": 0.6313617606602476,
+      "window_samples": 300
+    },
+    "y-velocity": {
+      "previous_window_median": 0.648515,
+      "last_window_median": 0.41007499999999997,
+      "last_to_previous_ratio": 0.6323292445047531,
+      "window_samples": 300
+    },
+    "energy": {
+      "previous_window_median": 0.20504,
+      "last_window_median": 0.13272499999999998,
+      "last_to_previous_ratio": 0.6473127194693717,
+      "window_samples": 300
+    }
+  },
+  "status": "failed",
+  "final_iteration": 1200,
+  "final_residuals": {
+    "continuity": 0.098158,
+    "x-velocity": 0.026089,
+    "y-velocity": 0.29745,
+    "energy": 0.085149
+  },
+  "recent_temperature_or_pressure_limiting": false,
+  "reasons": [
+    "Final residuals exceed screening thresholds: continuity=0.098158, x-velocity=0.026089, y-velocity=0.29745, energy=0.085149"
+  ],
+  "interpretation": "Residual screening is not force/temperature stability or mesh-independence verification."
+}

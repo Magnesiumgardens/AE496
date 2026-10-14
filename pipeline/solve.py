@@ -93,10 +93,11 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
     if cfg.get("aero", {}).get("enabled", True):
         reference_state(cfg)  # Validate reference assumptions before launching Fluent.
 
+    from .temperature_export import temperature_conditions
+    summary = {"source_conditions":temperature_conditions(cfg), "source_mesh_sha256":file_sha256(mesh_file),
+               "source_geometry_sha256":file_sha256(cfg["geometry"]["input_file"])}
     print("[solve] Launching 2-D double-precision Fluent solver...")
     solver = launch_solver(cfg)
-
-    summary = {}
 
     try:
         print(f"[solve] Reading 2-D mesh: {mesh_file}")
