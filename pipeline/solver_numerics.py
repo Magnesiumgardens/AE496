@@ -11,21 +11,25 @@ def configure_numerics(solver,cfg):
     solution.controls.courant_number = courant
     schemes = solution.methods.spatial_discretization.discretization_scheme
     wanted = options.get("flow_scheme", "first-order-upwind")
-    # Fluent 251's creatable dictionary may initially have no entries. Native
-    # assignment creates the entry; get_object_names is not a capability list.
-    try:
-        schemes["flow"] = wanted
-        entry = schemes["flow"]
-        selected = entry.get_state()
-        if selected != wanted:
-            raise ValueError(f"Fluent returned {selected!r} after requesting {wanted!r}")
-    except (RuntimeError, ValueError, KeyError, AttributeError) as exc:
-        try:allowed = schemes["flow"].allowed_values()
-        except (RuntimeError, KeyError, AttributeError):allowed = []
-        raise ValueError(f"Could not set density-based flow scheme {wanted!r}; "
-                         f"native entries={schemes.get_object_names()}, allowed flow choices={allowed}: {exc}") from exc
-    print(f"[solve] Numerics: Courant={courant:g}; flow={selected}",flush=True)
-    return dict(courant_number=courant,flow_scheme=selected)
+    names = schemes.get_object_names()
+    # Fluent251 exposes the coupled density-based equations as amg-c. Other
+    # releases may use flow. Generated CreatableNamedObjectMixin does not imply
+    # that the server permits creating additional discretization entries.
+    key = next((name for name in ("amg-c", "flow") if name in names), None)
+    if key is None:
+        raise ValueError(f"No existing coupled-flow discretization entry; native entries={names}")
+    entry = schemes[key]
+    allowed = entry.allowed_values()
+    def canonical(value):return "".join(c for c in str(value).casefold() if c.isalnum())
+    selected = next((value for value in allowed if canonical(value) == canonical(wanted)), None)
+    if selected is None:
+        raise ValueError(f"Flow scheme {wanted!r} unavailable on {key!r}; native choices={allowed}")
+    schemes[key] = selected
+    actual = schemes[key].get_state()
+    if canonical(actual) != canonical(selected):
+        raise ValueError(f"Fluent {key!r}: requested {selected!r}, returned {actual!r}")
+    print(f"[solve] Numerics: Courant={courant:g}; flow[{key}]={selected}",flush=True)
+    return dict(courant_number=courant,flow_scheme=selected,flow_scheme_entry=key)
 
 
 def initialize_flow(solver,cfg,farfield):
@@ -44,8 +48,12 @@ def initialize_flow(solver,cfg,farfield):
               "temperature":state["static_temperature_K"],
               "x-velocity":state["velocity_m_s"]*state["drag_direction"][0],
               "y-velocity":state["velocity_m_s"]*state["drag_direction"][1]}
+    available = defaults.get_object_names()
+    missing = set(values) - set(available)
+    if missing:
+        raise ValueError(f"Freestream initialization defaults missing {sorted(missing)}; native defaults={available}")
     for key,value in values.items():
-        # Initialization defaults are also a creatable dictionary in Fluent 251.
+        # Only update entries which the Fluent server actually exposes.
         defaults[key] = value
         actual = float(defaults[key].get_state())
         if not math.isclose(actual,value,rel_tol=1e-9,abs_tol=1e-9):
