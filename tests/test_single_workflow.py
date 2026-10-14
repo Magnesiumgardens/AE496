@@ -167,5 +167,32 @@ class SingleWorkflowTests(unittest.TestCase):
         self.assertNotEqual(state['stages'].get('thermal',{}).get('status'),'complete')
         self.assertFalse((self.work/'thermal_analysis').exists())
 
+    def test_thermal_timeout_retry_reuses_all_completed_cfd_stages_and_retains_native_logs(self):
+        def timeout(command,log_path,**kwargs):
+            if Path(command[2]).name=='run_thermal_analysis.py':
+                self.calls.append('run_thermal_analysis.py')
+                output=self.work/'thermal_analysis';output.mkdir()
+                (output/'mapdl_console.out').write_text('partial native Mechanical output')
+                raise BatchError('Stage inactivity timeout')
+            self.runner(command,log_path,**kwargs)
+        with self.assertRaisesRegex(BatchError,'inactivity timeout'):
+            run_case(self.path,self.thermal,_runner=timeout)
+        preserved={name:file_sha256(self.work/name) for name in
+            ('02_mesh.msh.h5','04_final.cas.h5','04_final.dat.h5','aero_summary.json')}
+        self.calls.clear()
+        def retry(command,log_path,**kwargs):
+            expected=self.work/'thermal_analysis/mapdl_console.out'
+            self.assertIn(expected,kwargs['activity_files'])
+            self.runner(command,log_path,**kwargs)
+        result=run_case(self.path,self.thermal,_runner=retry)
+        self.assertEqual(self.calls,['run_thermal_analysis.py'])
+        self.assertTrue(all(result['stages'][stage]=='reused' for stage in
+                            ('mesh','solver','temperature_export','aero')))
+        for name,digest in preserved.items():
+            self.assertEqual(file_sha256(self.work/name),digest)
+        retained=list((self.work/'_history').glob('*/thermal_analysis/mapdl_console.out'))
+        self.assertEqual(len(retained),1)
+        self.assertEqual(retained[0].read_text(),'partial native Mechanical output')
+
 
 if __name__=='__main__':unittest.main()

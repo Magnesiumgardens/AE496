@@ -166,10 +166,30 @@ def _terminate_process_tree(process):
         process.wait(timeout=5)
 
 
-def run_stage(command, log_path, hard_timeout_s=7200, inactivity_timeout_s=1200):
-    """Capture output and stop only this owned subprocess tree on timeout."""
+def _activity_snapshot(paths):
+    """Record native files without treating old files or directories as activity."""
+    states = {}
+    for path in paths:
+        try:
+            stat = path.stat()
+            states[path] = (stat.st_size, stat.st_mtime_ns) if path.is_file() else None
+        except OSError:
+            states[path] = None
+    return states
+
+
+def run_stage(command, log_path, hard_timeout_s=7200, inactivity_timeout_s=1200,
+              *, activity_files=()):
+    """Capture output and native file progress; stop this subprocess tree on timeout.
+
+    MAPDL can write results and its native console file while its Python client is
+    blocked in a command. Only changes to the explicitly watched files count as
+    activity. The hard deadline is unaffected by either output stream.
+    """
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    activity_paths = tuple(dict.fromkeys(resolve(REPO_ROOT, path) for path in activity_files))
+    file_states = _activity_snapshot(activity_paths)
     process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding="utf-8", errors="replace", bufsize=1,
                                start_new_session=os.name != "nt")
@@ -181,7 +201,9 @@ def run_stage(command, log_path, hard_timeout_s=7200, inactivity_timeout_s=1200)
         messages.put(None)
 
     threading.Thread(target=collect, daemon=True).start()
-    started = last_output = time.monotonic()
+    started = last_activity = time.monotonic()
+    last_native_activity = None
+    last_activity_message = float("-inf")
     ended = False
     try:
         with log_path.open("w", encoding="utf-8") as log:
@@ -194,14 +216,34 @@ def run_stage(command, log_path, hard_timeout_s=7200, inactivity_timeout_s=1200)
                         print(line, end="", flush=True)
                         log.write(line)
                         log.flush()
-                        last_output = time.monotonic()
+                        last_activity = time.monotonic()
                 except queue.Empty:
                     pass
                 now = time.monotonic()
-                if now - started > hard_timeout_s or now - last_output > inactivity_timeout_s:
+                current_states = _activity_snapshot(activity_paths)
+                changed = [(path, state) for path, state in current_states.items()
+                           if state is not None and state != file_states[path]]
+                file_states = current_states
+                if changed:
+                    last_activity = now
+                    path, state = changed[-1]
+                    last_native_activity = (path, state[0], now)
+                    if now - last_activity_message >= 10.0:
+                        message = f"[study] Native activity: {path} ({state[0]} bytes)\n"
+                        print(message, end="", flush=True)
+                        log.write(message)
+                        log.flush()
+                        last_activity_message = now
+                if now - started > hard_timeout_s or now - last_activity > inactivity_timeout_s:
                     reason = "hard" if now - started > hard_timeout_s else "inactivity"
-                    log.write(f"\nStage {reason} timeout\n")
-                    raise BatchError(f"Stage {reason} timeout; see {log_path}")
+                    detail = ""
+                    if last_native_activity is not None:
+                        path, size, observed = last_native_activity
+                        detail = (f"; last native activity: {path} ({size} bytes), "
+                                  f"{now - observed:.1f} s ago")
+                    log.write(f"\nStage {reason} timeout{detail}\n")
+                    log.flush()
+                    raise BatchError(f"Stage {reason} timeout{detail}; see {log_path}")
             code = process.wait()
             if code:
                 raise BatchError(f"Stage exited with status {code}; see {log_path}")
@@ -364,10 +406,15 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                 if delay:
                     print(f"[study] Waiting {delay:g} s for meshing license release", flush=True)
                     time.sleep(delay)
+            activity = {}
+            if stage == "thermal":
+                activity["activity_files"] = [work / "thermal_analysis" / name for name in (
+                    "nose_thermal.out", "nose_thermal.err", "nose_thermal.rth", "nose_thermal.rst",
+                    "nose_thermal.db", "mapdl_console.out", "mapdl_commands.log", ".__tmp__.out")]
             runner([sys.executable, "-u", str(REPO_ROOT / commands[stage][0]), *commands[stage][1:]],
                    work / "batch_logs" / f"{stage}.log",
                    hard_timeout_s=float(timeout.get("hard_s", 7200)),
-                   inactivity_timeout_s=float(timeout.get("inactivity_s", 1200)))
+                   inactivity_timeout_s=float(timeout.get("inactivity_s", 1200)), **activity)
             validate_stage_outputs(stage, files[stage])
             if stage == "solver":
                 from .solution_quality import assess_log, save_diagnostics

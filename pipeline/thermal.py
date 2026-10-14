@@ -12,7 +12,7 @@ import yaml
 
 from .thermal_loading import (
     ThermalAnalysisError, ThermalLoad, auto_mesh_size, integrate_boundary,
-    prepare_load, read_boundary, validate_settings,
+    prepare_load, read_boundary, validate_settings, positive,
 )
 from .trade_study import thermal_screening_metrics
 
@@ -20,6 +20,10 @@ MODEL_VERSION = "3.0-temperature-convection"
 ENDPOINT_MODEL_VERSION = "4.0-endpoint-convection"
 PRESCRIBED_MODEL_VERSION = "5.0-prescribed-temperature"
 STEFAN_BOLTZMANN = 5.670374419e-8
+
+
+def _progress(message):
+    print(f"[thermal] {message}", flush=True)
 
 
 def load_yaml(path):
@@ -236,18 +240,28 @@ def apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size):
         for node, value in zip(selected, values):
             mapdl.d(int(node), "TEMP", float(value))
     load.constrained_node_count = len(selected)
+    _progress(f"Prescribed CFD temperatures on {len(selected)} solid boundary nodes")
     return selected, values
 
 
 def solve_thermal(mapdl, load, settings, mesh_size):
+    _progress(f"Reconstructing solid from {len(load.xy)} CFD boundary vertices")
     mapdl.clear()
     mapdl.prep7()
     mapdl.et(1, "PLANE293")
     mapdl.keyopt(1, 1, 1)  # six-node triangle, unit out-of-plane thickness
     for label, value in (("KXX", settings["k"]), ("KYY", settings["k"]), ("DENS", settings["rho"]), ("C", settings["cp"])):
         mapdl.mp(label, 1, value)
-    points = [int(mapdl.k("", float(x), float(y), 0)) for x, y in load.xy]
-    lines = [int(mapdl.l(point, points[(index + 1) % len(points)])) for index, point in enumerate(points)]
+    points = []
+    for number, (x, y) in enumerate(load.xy, 1):
+        points.append(int(mapdl.k("", float(x), float(y), 0)))
+        if number % 50 == 0 or number == len(load.xy):
+            _progress(f"Created {number}/{len(load.xy)} solid keypoints")
+    lines = []
+    for index, point in enumerate(points):
+        lines.append(int(mapdl.l(point, points[(index + 1) % len(points)])))
+        if (index + 1) % 50 == 0 or index + 1 == len(points):
+            _progress(f"Created {index + 1}/{len(points)} boundary lines")
     mapdl.allsel()
     area = int(mapdl.al("ALL"))
     if area <= 0:
@@ -259,7 +273,8 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     mapdl.esize(mesh_size)
     mapdl.mshape(1, "2D")
     mapdl.mshkey(0)
-    mapdl.amesh(area)
+    _progress(f"Meshing solid; target element size={mesh_size:g} m")
+    mapdl.amesh(area, verbose=True)
     mapdl.allsel()
     mapdl.sftran()
     nnum = np.asarray(mapdl.mesh.nnum, dtype=int).copy()
@@ -267,7 +282,9 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     n_elements = len(mapdl.mesh.enum)
     if len(nnum) < 3 or n_elements < 1:
         raise ThermalAnalysisError("MAPDL generated an empty thermal mesh.")
+    _progress(f"Mesh complete: {len(nnum)} nodes / {n_elements} elements")
     if load.mode == "prescribed_temperature":
+        _progress("Mapping the prescribed surface-temperature field onto the solid mesh")
         apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size)
     mapdl.finish()
     mapdl.slashsolu()
@@ -281,20 +298,25 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     mapdl.deltim(settings["dt0"], settings["dtmin"], settings["dtmax"])
     mapdl.outres("ALL", "ALL")
     mapdl.neqit(100)
-    print(f"[thermal] Solving {len(nnum)} nodes / {n_elements} elements for {settings['duration']:g} s...")
-    message = str(mapdl.solve())
+    _progress(f"Solving {len(nnum)} nodes / {n_elements} elements for {settings['duration']:g} s; streaming MAPDL output")
+    message = str(mapdl.solve(verbose=True))
     if "*** ERROR ***" in message.upper():
         raise ThermalAnalysisError("MAPDL solve failed:\n" + message[-5000:])
     mapdl.finish()
     mapdl.post1()
+    # Open the result file before querying ACTIVE,SET,NSET metadata.
+    mapdl.set("LAST")
     nsets = int(mapdl.post_processing.nsets)
     times = list(mapdl.post_processing.time_values)
     if nsets < 1 or len(times) != nsets:
         raise ThermalAnalysisError("MAPDL result-set/time metadata is incomplete.")
+    _progress(f"Reading {nsets} thermal result sets")
     temperatures = []
     for number in range(1, nsets + 1):
         mapdl.set(1, number)  # single transient load step
         temperatures.append(np.asarray(mapdl.post_processing.nodal_temperature(), dtype=float).copy())
+        if number % 10 == 0 or number == nsets:
+            _progress(f"Read result set {number}/{nsets}; physical time={float(times[number - 1]):g} s")
     return nnum, xyz, temperatures, times, n_elements
 
 
@@ -305,10 +327,12 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
     from .temperature_export import temperature_paths
     from .solution_quality import require_usable_solution
     from .utils import atomic_json, file_sha256
+    _progress("Validating saved CFD temperatures and Mechanical configuration")
     cfg = load_config(cfd_config)
     ta_cfg = load_yaml(thermal_config)
     thermal_config_sha256 = file_sha256(thermal_config)
     settings = validate_settings(cfg, ta_cfg)  # Validate the loading law before any Ansys launch.
+    launch_timeout = positive("mapdl_start_timeout_s", ta_cfg.get("mapdl_start_timeout_s", 120))
     work = Path(cfg["project"]["work_dir"])
     if run_dir is not None and Path(run_dir).resolve() != work:
         raise ThermalAnalysisError("--run-dir disagrees with the selected CFD config")
@@ -345,18 +369,31 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
     mesh_size = auto_mesh_size(load.xy, ta_cfg.get("mesh_size_m"))
     output = work / "thermal_analysis"
     output.mkdir(parents=True, exist_ok=True)
+    _progress(f"Case: {work}; loading={settings['loading_mode']}; {len(load.xy)} boundary vertices")
+    _progress(f"Tungsten properties: k={settings['k']:g} W/(m K), rho={settings['rho']:g} kg/m3, Cp={settings['cp']:g} J/(kg K)")
+    _progress(f"Exposure={settings['duration']:g} s; target mesh size={mesh_size:g} m")
+    _progress(f"MAPDL command/output logs: {output}")
     from ansys.mapdl.core import launch_mapdl
-    mapdl = launch_mapdl(version=int(ta_cfg.get("mapdl_version",251)),
-                         nproc=int(ta_cfg.get("processors",4)), run_location=str(output),
-                         jobname="nose_thermal")
+    _progress(f"Launching Mechanical APDL {ta_cfg.get('mapdl_version', 251)}; connection timeout={launch_timeout:g} s")
+    try:
+        mapdl = launch_mapdl(version=int(ta_cfg.get("mapdl_version",251)), mode="grpc",
+                             nproc=int(ta_cfg.get("processors",4)), run_location=str(output),
+                             jobname="nose_thermal", start_timeout=launch_timeout,
+                             log_apdl=str(output / "mapdl_commands.log"),
+                             mapdl_output=str(output / "mapdl_console.out"))
+    except Exception as exc:
+        raise ThermalAnalysisError(f"MAPDL launch failed: {exc}. Native startup logs are in {output}") from exc
+    _progress("Mechanical APDL connected")
     try:
         nnum, xyz, temperatures, times, n_elements = solve_thermal(mapdl,load,settings,mesh_size)
+        _progress("Saving thermal histories and final node temperatures")
         history, snapshots, final, net_heat = save_results(output,load,nnum,xyz,temperatures,times,
             settings,mesh_size,ta_cfg.get("visualization",{}).get("max_animation_frames",60))
         viz = dict(ta_cfg.get("visualization",{}), save_heat_flux_image=False)
         if prescribed:
             viz["loading_mode"] = "prescribed_temperature"
         from .reporting import create_thermal_visualizations
+        _progress("Generating thermal plots")
         figures = create_thermal_visualizations(output,load.xy,np.zeros(len(load.xy)),xyz,history,snapshots,viz)
         loading_limits = (["The steady CFD radiative-equilibrium wall temperature is prescribed on every Mechanical boundary node.",
                            "The surface temperature steps to the imported field at t=0+ and remains fixed; only the interior temperature response is predicted.",
@@ -402,4 +439,5 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         print(f"[thermal] Complete: {output}; duration={settings['duration']:g} s; {description}")
         return summary
     finally:
+        _progress("Closing Mechanical APDL")
         mapdl.exit()

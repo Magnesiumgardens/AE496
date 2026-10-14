@@ -3,6 +3,8 @@
 # predicts conduction into tungsten, not a convective surface warm-up.
 mapdl_version: 251
 processors: 4
+# Bound license/server startup separately from the full Mechanical stage.
+mapdl_start_timeout_s: 120
 mesh_size_m: null
 initial_temperature_k: 300.0
 include_radiation: false

@@ -89,6 +89,19 @@ Changing only material settings or exposure reuses valid CFD exports and reruns 
 .\.venv\Scripts\python.exe study.py thermal --config ".\runs\blunt_1\_batch\config.yaml"
 ```
 
+If the run reached `[study] blunt_1: thermal` and then reported an inactivity timeout, update and resume that case:
+
+```powershell
+.\.venv\Scripts\python.exe study.py update
+if ($LASTEXITCODE -eq 0) {
+    .\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after thermal
+}
+```
+
+Resume reuses valid saved CFD, temperature exports and aerodynamic results, then reruns the unfinished Mechanical stage. Keep resume enabled to retain this reuse. The thermal stage reports startup, geometry, meshing, solve and result-reading progress, and streams the native meshing and solve output. Its inactivity check also watches actual MAPDL output and result-file changes; a long native command can remain active without Python stdout. The separate hard deadline still applies. An inactivity timeout by itself does not identify whether MAPDL was busy, waiting for a license or stalled.
+
+`thermal_analysis.yaml` accepts `mapdl_start_timeout_s: 120` to bound the initial MAPDL connection wait. Native output and command logs are saved in `runs/<case>/thermal_analysis/mapdl_console.out` and `mapdl_commands.log`; the stage log is `runs/<case>/batch_logs/thermal.log`. Inspect these logs if the retry stops, rather than restarting CFD.
+
 ## Convergence and continuation
 
 The template uses the numerical setup from the supplied successful adiabatic run:

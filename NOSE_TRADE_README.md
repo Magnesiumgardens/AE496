@@ -31,6 +31,15 @@ through `--stop-after solver` first; a changed solver setup starts fresh while
 reusing unchanged mesh data. The radiation case still needs live verification,
 and first-order results need scheme and mesh sensitivity checks for CDR.
 
+After a thermal-stage inactivity timeout, update and resume the existing case
+with `study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after thermal`.
+Valid CFD and export stages are reused. Mechanical now reports its phases,
+streams native meshing/solve output, and counts native output/result-file
+changes as activity while retaining the hard deadline. The configurable
+`mapdl_start_timeout_s` defaults to 120 seconds. Diagnostic logs are retained
+under `runs/<case>/thermal_analysis/` and `batch_logs/thermal.log`; see the
+[update and recovery commands](README.md#mechanical-settings-and-physical-time).
+
 Review nose orientation, radiation environment, reference width, tungsten
 properties and exposure before batching. Default airflow remains toward −X,
 SpaceClaim remains selected, and the current default exposure is 200 seconds.
