@@ -75,7 +75,7 @@ def preflight(cfg):
 def continue_solver(cfg, iterations, output_dir):
     """Write to a new directory, keeping the original solution intact on errors."""
     original = work_paths(cfg)["work"]
-    if cfg.get("_endpoint_kind"):preflight(cfg)
+    if cfg.get("_endpoint_kind") or cfg.get("workflow",{}).get("strategy") == "single_solve":preflight(cfg)
     output = Path(output_dir).resolve()
     output.relative_to(original)  # this operation owns only files inside this case
     if (output/"04_final.cas.h5").exists() or (output/"04_final.dat.h5").exists():
@@ -108,6 +108,12 @@ def continue_solver(cfg, iterations, output_dir):
         if summary["temperature_history"].get("status") == "complete":
             summary["temperature_history"]["source_sha256"] = source
         summary.pop("numerical_quality",None)
+        if cfg["thermal"]["mode"] == "radiative_equilibrium":
+            # These reports belonged to the previous checkpoint. The saved-case
+            # temperature export computes statistics for the new pair.
+            for key in ("wall_temperature_min_k","wall_temperature_avg_k","wall_temperature_max_k"):
+                summary.pop(key,None)
+            summary["wall_temperature_report"] = {"status":"pending_export","reason":"Continued solution has a new case/data pair"}
         summary.update(solution_status="additional_iterations_completed", convergence_status="not_verified",
                        source_conditions=temperature_conditions(cfg),
                        source_mesh_sha256=file_sha256(Path(cfg.get("_study_work_dir",original))/"02_mesh.msh.h5"),
@@ -255,7 +261,13 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None, e
         signature = fingerprint(endpoint,root_cfg,{},files)
         state_path = root/"_batch/stage_state.json"
     else:
-        for stage in ("temperature_export","aero"):_archive_stage(stage,work,cfg,state)
+        if cfg.get("workflow",{}).get("strategy") == "single_solve":
+            from .study import INVALIDATES
+            pending_archives = ["temperature_export","aero"]
+            for stage in pending_archives:
+                for name in INVALIDATES[stage]:state["stages"][name] = {"status":"stale","reason":"Radiative CFD continued"}
+        else:
+            for stage in ("temperature_export","aero"):_archive_stage(stage,work,cfg,state)
         files = stage_files(work,cfg)
         stage_name = "solver"
         signature = stage_fingerprint("solver",cfg,{},files)
@@ -268,7 +280,9 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None, e
     # any export files. A locked Windows output must not trigger a fresh solve
     # of an already promoted, screened continuation on the next study run.
     for stage in pending_archives:
-        try:archive_endpoint(stage,root_cfg,state)
+        try:
+            if two_endpoint:archive_endpoint(stage,root_cfg,state)
+            else:_archive_stage(stage,work,cfg,state)
         finally:_save_state(state_path,state)
     save_diagnostics(work/"batch_logs/solver.log",cfg)
     return dict(case=cfg["project"]["name"],status="complete" if quality["status"] == "residual_screen_passed" else "not_converged",

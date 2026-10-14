@@ -42,7 +42,7 @@ class EndpointWorkflowTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name); self.work = self.root/'runs/nose'
         self.work.mkdir(parents=True)
-        self.cfg = yaml.safe_load((ROOT/'config.yaml').read_text())
+        self.cfg = yaml.safe_load((ROOT/'tests/fixtures/two_endpoint_config.yaml').read_text())
         geometry = self.root/'nose.x_t'; geometry.write_text('CAD fixture')
         self.cfg['geometry']['input_file'] = str(geometry)
         self.cfg['project'].update(name='nose',work_dir=str(self.work))
@@ -51,7 +51,7 @@ class EndpointWorkflowTests(unittest.TestCase):
         self.save_config()
         self.calls = []
         self.thermal = self.root/'thermal.yaml'
-        self.thermal.write_text((ROOT/'thermal_analysis.yaml').read_text())
+        self.thermal.write_text((ROOT/'tests/fixtures/endpoint_thermal_analysis.yaml').read_text())
 
     def save_config(self):self.path.write_text(yaml.safe_dump(self.cfg))
 

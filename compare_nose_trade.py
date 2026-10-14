@@ -15,7 +15,8 @@ def compare(runs_dir, output_dir, reference_dir=None):
         create_mechanical_reports(runs_dir, Path(output_dir) / "solid")
         return gas
     runs_dir, output_dir = Path(runs_dir), Path(output_dir)
-    rows = []
+    rows, legacy_names = [], set()
+    has_prescribed_cases = False
     for directory in sorted(runs_dir.iterdir()) if runs_dir.is_dir() else []:
         config_path = directory / "_batch/config.yaml"
         if not directory.is_dir() or not config_path.is_file():
@@ -23,6 +24,12 @@ def compare(runs_dir, output_dir, reference_dir=None):
         if not (directory / "aero_summary.json").is_file() and not (directory / "thermal_analysis/thermal_summary.json").is_file():
             continue
         cfg = load_yaml(config_path)
+        if cfg.get("thermal", {}).get("mode") == "radiative_equilibrium":
+            # Historical heating curves describe a different surface load.
+            # Keep the current prescribed-surface study in a separate view.
+            has_prescribed_cases = True
+            continue
+        legacy_names.add(directory.name)
         thermal = read_json(directory / "thermal_analysis/thermal_summary.json")
         try:
             fresh = aero_complete_for_report(cfg)
@@ -34,7 +41,12 @@ def compare(runs_dir, output_dir, reference_dir=None):
             row["aero_status"] = "stale"
         rows.append(row)
     save_batch_summary(output_dir, rows)
-    created = create_comparison_outputs(runs_dir, rows, output_dir, reference_dir)
+    created = create_comparison_outputs(runs_dir, rows, output_dir, reference_dir, case_names=legacy_names)
+    if has_prescribed_cases:
+        from pipeline.gas_reporting import create_gas_reports
+        from pipeline.mechanical_reporting import create_mechanical_reports
+        create_gas_reports(runs_dir, output_dir / "current")
+        create_mechanical_reports(runs_dir, output_dir / "current/solid")
     print(f"[report] {len(rows)} simulated cases; outputs: {output_dir}")
     return rows, created
 

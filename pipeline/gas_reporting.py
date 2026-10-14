@@ -1,4 +1,4 @@
-"""Per-nose and comparison figures for steady adiabatic CFD gas temperatures."""
+"""Per-nose and comparison figures from saved steady CFD temperatures."""
 from pathlib import Path
 import copy
 import json
@@ -23,6 +23,8 @@ CASE_ARTIFACTS = (
     "fluid_temperature_near_wall.png", "temperature_convergence.png", "adiabatic_case_report.json",
     "derived_h_profile.csv", "derived_h_profile.png", "derived_h_map.png",
     "cold_wall_heat_flux_profile.png", "cold_wall_heat_flux_map.png",
+    "radiative_equilibrium_wall_boundary.png", "radiative_equilibrium_wall_temperature_map.png",
+    "radiative_equilibrium_case_report.json",
 )
 COMPARISON_ARTIFACTS = (
     "adiabatic_temperature_summary.csv", "adiabatic_temperature_profiles.csv",
@@ -32,7 +34,26 @@ COMPARISON_ARTIFACTS = (
     "temperature_convergence_comparison.png",
     "heat_transfer_coefficient_comparison.png",
     "adiabatic_report.json",
+    "radiative_equilibrium_temperature_summary.csv", "radiative_equilibrium_temperature_profiles.csv",
+    "radiative_equilibrium_report.json", "drag_vs_wall_temperature.png",
+    "temperature_summary.csv", "temperature_profiles.csv", "steady_temperature_report.json",
 )
+
+
+def _mode(cfg):
+    return report_cfg(cfg).get("thermal", {}).get("mode", "unknown")
+
+
+def _labels(mode):
+    if mode == "radiative_equilibrium":
+        return dict(wall="Radiative-equilibrium wall temperature", model="steady_radiative_equilibrium_planar_CFD",
+                    short="radiative_equilibrium", title="steady radiative-equilibrium CFD",
+                    boundary="Gas-to-wall heat transfer balances external radiation; equilibrium wall temperature is solved.",
+                    interpretation="Equilibrium surface temperature and separate fluid-side static samples. Mechanical prescribes the surface temperature; it does not predict its warm-up.")
+    return dict(wall="Adiabatic wall / recovery temperature", model="steady_adiabatic_planar_CFD",
+                short="adiabatic", title="steady adiabatic CFD",
+                boundary="q_wall = 0; no radiation or imposed wall temperature",
+                interpretation="Gas/recovery temperatures; no solid thermal history or material-temperature prediction.")
 
 
 def _clear_generated(directory, filenames):
@@ -65,11 +86,26 @@ def source_cfg(cfg):
     return result
 
 
+def _single_source_current(cfg):
+    """Match the saved radiating solution to the actual CAD and mesh bytes."""
+    work = source_work(cfg)
+    summary = read_json(work / "summary.json")
+    return (summary.get("thermal_mode") == "radiative_equilibrium" and
+            summary.get("source_geometry_sha256") == file_sha256(cfg["geometry"]["input_file"]) and
+            summary.get("source_mesh_sha256") == file_sha256(work / "02_mesh.msh.h5"))
+
+
 def aero_complete_for_report(cfg):
     """Endpoint forces are stored at the nose root but come from adiabatic CFD."""
     work = Path(cfg.get("_study_work_dir", cfg["project"]["work_dir"]))
     if cfg.get("workflow", {}).get("strategy") != "two_endpoint":
-        return aero_complete(work, cfg)
+        if not aero_complete(work, cfg):return False
+        if _mode(cfg) != "radiative_equilibrium":return True
+        try:
+            return (_single_source_current(cfg) and read_aero(work).get("source_sha256") == {
+                "final_case": file_sha256(work / "04_final.cas.h5"),
+                "final_data": file_sha256(work / "04_final.dat.h5")})
+        except (OSError, ValueError, KeyError, TypeError):return False
     result = read_aero(work)
     if result.get("status") != "complete" or result.get("model_version") != AERO_MODEL_VERSION:
         return False
@@ -96,12 +132,21 @@ def aero_complete_for_report(cfg):
 def temperature_complete(cfg):
     try:
         cfg = report_cfg(cfg)
-        if cfg.get("thermal") != {"mode": "adiabatic"}:
+        mode = _mode(cfg)
+        if mode not in {"adiabatic", "radiative_equilibrium"}:
             return False
         csv_path, summary_path = temperature_paths(cfg)
         summary = read_json(summary_path)
-        if summary.get("status") != "complete" or summary.get("thermal_mode") != "adiabatic":
+        if summary.get("status") != "complete" or summary.get("thermal_mode") != mode:
             return False
+        if mode == "radiative_equilibrium":
+            from .solution_quality import saved_quality
+            if saved_quality(source_cfg(cfg))["status"] != "residual_screen_passed":
+                return False
+            nodes = summary.get("wall_nodes", {})
+            if (not _single_source_current(cfg) or nodes.get("status") != "complete" or
+                    nodes.get("csv_sha256") != file_sha256(csv_path.parent / "wall_temperature_nodes.csv")):
+                return False
         work = source_work(cfg)
         return (summary.get("temperature_export_signature") == cfg.get("temperature_export", {}) and
                 summary.get("conditions") == temperature_conditions(cfg) and
@@ -144,7 +189,7 @@ def build_gas_row(cfg, status="complete", elapsed_s=0, error=""):
     def metric(section, key):
         values = summary.get(section, {})
         return values.get(key) if fresh_temp and isinstance(values, dict) else None
-    return dict(case=project.get("name", "unknown"), status=status, thermal_mode="adiabatic",
+    return dict(case=project.get("name", "unknown"), status=status, thermal_mode=_mode(cfg),
         temperature_status="complete" if fresh_temp else "missing_or_stale",
         aero_status="complete" if fresh_aero else "missing_or_stale", error=error, elapsed_s=round(elapsed_s, 3),
         maximum_wall_temperature_K=metric("wall_temperature", "maximum_K"),
@@ -237,7 +282,7 @@ def _read_nodes(summary, wall_csv, warnings, case):
 def _read_history(work, temperature_summary, warnings, case):
     """Read saved CFD iteration samples only when they belong to this solution."""
     solver_summary = read_json(work / "summary.json")
-    if solver_summary.get("thermal_mode") != "adiabatic":
+    if solver_summary.get("thermal_mode") not in {"adiabatic", "radiative_equilibrium"}:
         return []
     metadata = solver_summary.get("temperature_history", {})
     if not isinstance(metadata, dict) or metadata.get("status") not in {"complete", "partial"}:
@@ -289,23 +334,24 @@ def _read_convection(cfg, warnings, case):
 def _case_figures(case, temperature_ranges, plt):
     cfg, values, summary, points = case["cfg"], case["values"], case["summary"], case["nodes"]
     report_dir, name = case["work"] / "reports", cfg["project"]["name"]
+    labels = _labels(_mode(cfg))
     report_dir.mkdir(parents=True, exist_ok=True)
     files = {"temperature_profile_csv": str(write_csv(report_dir / "temperature_profile.csv", values))}
     for coordinate, xlabel, filename in (
             ("s_norm", "Normalized wall position, back → nose → back", "temperature_profile.png"),
             ("s_profile_m", "Distance along wall-face samples [m]", "wall_temperature_vs_position.png")):
         fig, ax = plt.subplots(figsize=(9, 5))
-        for column, label in (("wall_temperature_K", "Adiabatic wall / recovery"),
+        for column, label in (("wall_temperature_K", labels["wall"]),
                               ("near_wall_fluid_temperature_K", "Fluid-side surface values")):
             ax.plot([row[coordinate] for row in values], [float(row[column]) for row in values], label=label)
-        ax.set(xlabel=xlabel, ylabel="Temperature [K]", title=name + " — steady adiabatic CFD")
+        ax.set(xlabel=xlabel, ylabel="Temperature [K]", title=name + " — " + labels["title"])
         if coordinate == "s_norm":
             ax.set_xlim(0, 1)
         ax.grid(alpha=0.3)
         ax.legend()
         files[filename[:-4]] = _save(fig, report_dir / filename, plt)
     for column, title, filename in (
-            ("wall_temperature_K", "Adiabatic wall / recovery temperature", "adiabatic_wall_temperature_map.png"),
+            ("wall_temperature_K", labels["wall"], labels["short"] + "_wall_temperature_map.png"),
             ("near_wall_fluid_temperature_K", "Fluid-side static temperature (surface samples)", "near_wall_fluid_temperature_map.png")):
         fig, ax = plt.subplots(figsize=(10, 4))
         scatter = _wall_map(ax, values, column, name + " — " + title, temperature_ranges[column])
@@ -316,10 +362,10 @@ def _case_figures(case, temperature_ranges, plt):
     closed = np.vstack((xy, xy[0]))
     ax.plot(closed[:, 0], closed[:, 1], label="Ordered CFD wall-face samples")
     ax.scatter(xy[:, 0], xy[:, 1], s=12)
-    ax.set(xlabel="x [m]", ylabel="y [m]", title=name + " — adiabatic boundary sampling")
+    ax.set(xlabel="x [m]", ylabel="y [m]", title=name + " — wall boundary sampling")
     ax.set_aspect("equal", adjustable="box")
     ax.legend()
-    files["wall_boundary"] = _save(fig, report_dir / "adiabatic_wall_boundary.png", plt)
+    files["wall_boundary"] = _save(fig, report_dir / (labels["short"] + "_wall_boundary.png"), plt)
     if points:
         node_xy = np.asarray([[float(point["x_m"]), float(point["y_m"])] for point in points])
         temperature = np.asarray([float(point["static_temperature_K"]) for point in points])
@@ -351,7 +397,7 @@ def _case_figures(case, temperature_ranges, plt):
                               ("wall_temperature_max_k", "Maximum")):
             ax.plot([row["iteration"] for row in case["history"]],
                     [float(row[column]) for row in case["history"]], label=label, marker=".")
-        ax.set(xlabel="Fluent iteration", ylabel="Adiabatic wall / recovery temperature [K]",
+        ax.set(xlabel="Fluent iteration", ylabel=labels["wall"] + " [K]",
                title=name + " — CFD temperature convergence (no physical time)")
         ax.legend()
         ax.grid(alpha=0.3)
@@ -389,14 +435,14 @@ def _case_figures(case, temperature_ranges, plt):
         scatter = _wall_map(ax,convection,column,name+" — cold-wall calibration heat flux",limits,cmap="viridis")
         fig.colorbar(scatter,ax=ax,label="Calibration heat flux into wall [W/m²]")
         files["cold_wall_heat_flux_map"] = _save(fig,report_dir/"cold_wall_heat_flux_map.png",plt)
-    manifest = dict(model="steady_adiabatic_planar_CFD", files=files,
-                    wall_boundary_condition="q_wall = 0; no radiation or imposed wall temperature",
+    manifest = dict(model=labels["model"], files=files,
+                    wall_boundary_condition=labels["boundary"], interpretation=labels["interpretation"],
                     temperature_color_ranges_K=temperature_ranges, sampling=summary.get("sampling", {}),
                     spatial_method="Temperature-colored samples; no interpolation across the vehicle interior.",
                     convergence_history_samples=len(case["history"]),
-                    convection="Cold-wall calibrated spatial h, held constant as the solid warms." if convection else "No current derived-h package plotted.",
+                    convection="Cold-wall calibrated spatial h, held constant as the solid warms." if convection else "No convection coefficient is derived by this model.",
                     history="Steady CFD has no physical time history or transient solid temperature field.")
-    target = report_dir / "adiabatic_case_report.json"
+    target = report_dir / (labels["short"] + "_case_report.json")
     target.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return files
 
@@ -440,7 +486,7 @@ def create_gas_reports(runs_dir, output_dir):
         row = None
         try:
             cfg = load_yaml(path)
-            if cfg.get("thermal") != {"mode": "adiabatic"} and cfg.get("workflow", {}).get("strategy") != "two_endpoint":
+            if _mode(cfg) not in {"adiabatic", "radiative_equilibrium"}:
                 continue
             cfg.setdefault("project", {})["work_dir"] = str(work.resolve())
             cfg["project"].setdefault("name", work.name)
@@ -452,7 +498,7 @@ def create_gas_reports(runs_dir, output_dir):
             if row["temperature_status"] != "complete" or row["aero_status"] != "complete":
                 row["status"] = "incomplete"
             if row["temperature_status"] != "complete":
-                warnings.append(f"{work.name}: missing or stale adiabatic temperature export")
+                warnings.append(f"{work.name}: missing or stale {_mode(cfg)} temperature export")
                 continue
             gas_cfg = report_cfg(cfg)
             validate_stage_outputs("temperature_export", stage_files(work, gas_cfg)["temperature_export"])
@@ -475,7 +521,7 @@ def create_gas_reports(runs_dir, output_dir):
             conditions.add(comparison_key(reference_state(gas_cfg), json.dumps(cfg.get("mesh", {}), sort_keys=True)))
         except (ValueError, KeyError, OSError, TypeError, AttributeError, BatchError, yaml.YAMLError) as exc:
             if row is None:
-                rows.append(dict(case=work.name, status="invalid_export", thermal_mode="adiabatic", error=str(exc)))
+                rows.append(dict(case=work.name, status="invalid_export", thermal_mode=_mode(cfg), error=str(exc)))
             else:
                 row["status"] = "invalid_export"
                 row["error"] = str(exc)
@@ -491,9 +537,14 @@ def create_gas_reports(runs_dir, output_dir):
         limits = common_ranges or {column: _temperature_range(case["values"], column) for column in (
             "wall_temperature_K", "near_wall_fluid_temperature_K")}
         case_outputs[case["cfg"]["project"]["name"]] = _case_figures(case, limits, plt)
-    created = {"temperature_summary": str(write_csv(output_dir / "adiabatic_temperature_summary.csv", rows,
+    modes = {row.get("thermal_mode") for row in rows}
+    labels = _labels("radiative_equilibrium" if "radiative_equilibrium" in modes else "adiabatic")
+    mixed = len(modes) > 1
+    summary_name = "temperature_summary.csv" if mixed else labels["short"] + "_temperature_summary.csv"
+    profiles_name = "temperature_profiles.csv" if mixed else labels["short"] + "_temperature_profiles.csv"
+    created = {"temperature_summary": str(write_csv(output_dir / summary_name, rows,
         fields=list(dict.fromkeys(key for row in rows for key in row)) if rows else ["case", "status", "thermal_mode"]))}
-    created["temperature_profiles"] = str(write_csv(output_dir / "adiabatic_temperature_profiles.csv", profiles,
+    created["temperature_profiles"] = str(write_csv(output_dir / profiles_name, profiles,
         fields=list(profiles[0]) if profiles else ["design", "s_norm", "wall_temperature_K", "near_wall_fluid_temperature_K"]))
     if comparable and profiles:
         with_convection = [case for case in cases if case["convection"]]
@@ -509,7 +560,7 @@ def create_gas_reports(runs_dir, output_dir):
             ax.grid(alpha=0.3)
             created["heat_transfer_coefficient_comparison"] = _save(
                 fig, output_dir / "heat_transfer_coefficient_comparison.png", plt)
-        for column, label in (("wall_temperature_K", "Adiabatic wall / recovery temperature"),
+        for column, label in (("wall_temperature_K", labels["wall"]),
                               ("near_wall_fluid_temperature_K", "Fluid-side static temperature (surface samples)")):
             fig, ax = plt.subplots(figsize=(10, 5))
             for case in cases:
@@ -527,13 +578,13 @@ def create_gas_reports(runs_dir, output_dir):
         fig, ax = plt.subplots(figsize=(max(9, len(cases) * 1.5), 5))
         indices = np.arange(len(cases))
         for offset, (metric, label) in enumerate((
-                ("maximum_wall_temperature_K", "Maximum wall / recovery"),
-                ("mean_wall_temperature_K", "Mean wall / recovery"),
+                ("maximum_wall_temperature_K", "Maximum wall"),
+                ("mean_wall_temperature_K", "Mean wall"),
                 ("maximum_near_wall_fluid_temperature_K", "Maximum fluid-side"),
                 ("mean_near_wall_fluid_temperature_K", "Mean fluid-side"))):
             ax.bar(indices + (offset - 1.5) * 0.2, [case["row"][metric] for case in cases], width=0.2, label=label)
         ax.set_xticks(indices, [case["cfg"]["project"]["name"] for case in cases], rotation=25, ha="right")
-        ax.set(ylabel="Temperature [K]", title="Steady adiabatic gas temperature comparison (means weighted by wall length)")
+        ax.set(ylabel="Temperature [K]", title=labels["title"] + " temperature comparison (means weighted by wall length)")
         ax.legend()
         ax.grid(axis="y", alpha=0.3)
         created["temperature_statistics_comparison"] = _save(fig, output_dir / "gas_temperature_statistics_comparison.png", plt)
@@ -547,7 +598,7 @@ def create_gas_reports(runs_dir, output_dir):
                                 label=name + " maximum")
                 ax.plot(iterations, [float(row["wall_temperature_avg_k"]) for row in case["history"]],
                         linestyle="--", color=line.get_color(), label=name + " mean")
-            ax.set(xlabel="Fluent iteration", ylabel="Adiabatic wall / recovery temperature [K]",
+            ax.set(xlabel="Fluent iteration", ylabel=labels["wall"] + " [K]",
                    title="CFD temperature convergence comparison (solid = max, dashed = mean; no physical time)")
             ax.legend()
             ax.grid(alpha=0.3)
@@ -556,21 +607,27 @@ def create_gas_reports(runs_dir, output_dir):
         complete = [row for row in rows if row["status"] == "complete"]
         if complete:
             fig, ax = plt.subplots(figsize=(8, 5))
+            metric = "maximum_wall_temperature_K" if "radiative_equilibrium" in modes else "maximum_near_wall_fluid_temperature_K"
             for row in complete:
-                ax.scatter(row["drag_per_unit_span_N_m"], row["maximum_near_wall_fluid_temperature_K"])
-                ax.annotate(row["case"], (row["drag_per_unit_span_N_m"], row["maximum_near_wall_fluid_temperature_K"]))
-            ax.set(xlabel="Sectional drag [N/m]", ylabel="Maximum fluid-side surface temperature [K]",
-                   title="Adiabatic temperature and drag comparison")
+                ax.scatter(row["drag_per_unit_span_N_m"], row[metric])
+                ax.annotate(row["case"], (row["drag_per_unit_span_N_m"], row[metric]))
+            ax.set(xlabel="Sectional drag [N/m]", ylabel="Maximum wall temperature [K]" if "radiative_equilibrium" in modes else "Maximum fluid-side surface temperature [K]",
+                   title=labels["wall"] + " and drag comparison")
             ax.grid(alpha=0.3)
-            created["drag_vs_temperature"] = _save(fig, output_dir / "drag_vs_near_wall_temperature.png", plt)
-    manifest = dict(model="steady_adiabatic_planar_CFD", comparable_conditions=comparable,
+            filename = "drag_vs_wall_temperature.png" if "radiative_equilibrium" in modes else "drag_vs_near_wall_temperature.png"
+            created["drag_vs_temperature"] = _save(fig, output_dir / filename, plt)
+    manifest = dict(model=labels["model"], comparable_conditions=comparable,
         warnings=warnings, files=created, case_files=case_outputs,
         temperature_color_ranges_K=common_ranges,
-        interpretation="Gas/recovery temperatures; no solid thermal history or material-temperature prediction.",
+        interpretation=labels["interpretation"],
         sampling="Wall and fluid-side values use wall-face coordinates; fluid-side samples are not a specified offset distance.",
         spatial_method="Colored samples only; no invented temperature interpolation across the solid interior.",
-        history="No physical-time history exists for the steady adiabatic model. Optional convergence curves use Fluent iterations. Historical thermal figures require --reference-dir.",
+        history="No physical-time history exists in steady CFD. Optional convergence curves use Fluent iterations. Mechanical supplies separate physical-time solid results; historical figures require --reference-dir.",
         convergence="Assess residuals, force/temperature stability and mesh sensitivity before CDR conclusions.")
-    (output_dir / "adiabatic_report.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"[report] {len(rows)} adiabatic case(s); outputs: {output_dir}")
+    if mixed:
+        manifest.update(model="mixed_steady_planar_CFD",
+                        interpretation="Separate models are plotted per case. Cross-model comparisons are withheld.")
+    report_name = "steady_temperature_report.json" if mixed else labels["short"] + "_report.json"
+    (output_dir / report_name).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"[report] {len(rows)} steady CFD case(s); outputs: {output_dir}")
     return rows, created

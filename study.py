@@ -5,7 +5,7 @@ import argparse
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="Resume steady CFD endpoints, aerodynamic reports and separate Mechanical")
+    run = commands.add_parser("run", help="Resume one radiative-equilibrium CFD solve, aerodynamics and separate Mechanical")
     selection = run.add_mutually_exclusive_group(required=True)
     selection.add_argument("--config", help="Use an existing authoritative case YAML")
     selection.add_argument("--geometry", help="Create a case config from one CAD file and the base template")
@@ -13,7 +13,7 @@ def main():
     run.add_argument("--runs-dir", default="runs")
     run.add_argument("--stop-after", choices=("mesh", "cold_wall", "adiabatic", "thermal_bc", "solver", "temperature_export", "aero", "thermal"))
     run.add_argument("--thermal-config", default="thermal_analysis.yaml")
-    thermal = commands.add_parser("thermal", help="Run separate Mechanical APDL convection/conduction using exported temperatures")
+    thermal = commands.add_parser("thermal", help="Run separate Mechanical APDL conduction with prescribed CFD wall temperatures")
     thermal.add_argument("--config", required=True)
     thermal.add_argument("--thermal-config", default="thermal_analysis.yaml")
     run.add_argument("--no-resume", action="store_true")
@@ -29,11 +29,12 @@ def main():
     report.add_argument("--runs-dir", default="runs")
     report.add_argument("--output-dir", default="runs/comparison")
     report.add_argument("--reference-dir", help="Import the provided combined historical comparison CSVs")
-    export = commands.add_parser("export", help="Export adiabatic temperatures and forces from a solved case")
+    export = commands.add_parser("export", help="Export solved wall temperatures and forces from the selected CFD case")
     export.add_argument("--config", required=True)
     export.add_argument("--inspect-fields", action="store_true")
-    migrate = commands.add_parser("migrate", help="Back up and restore the cold-wall/adiabatic endpoint strategy")
+    migrate = commands.add_parser("migrate", help="Back up and select the single radiative-equilibrium CFD workflow")
     migrate.add_argument("--config", required=True)
+    migrate.add_argument("--thermal-config",help="Also back up and convert a separate Mechanical YAML")
     commands.add_parser("update", help="Fetch the study branch through Git and update with backups")
     args = parser.parse_args()
     if args.command == "update":
@@ -41,7 +42,26 @@ def main():
         return update_main()
     if args.command == "migrate":
         from pipeline.migration import migrate_config
+        thermal_change=None
+        if args.thermal_config:
+            from datetime import datetime,timezone
+            from pathlib import Path
+            import shutil
+            import yaml
+            from pipeline.migration import single_solve_thermal_config
+            path=Path(args.thermal_config).resolve()
+            raw=yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            if not isinstance(raw,dict):parser.error("Mechanical YAML must contain a mapping")
+            changed=single_solve_thermal_config(raw)
+            if changed != raw:thermal_change=(path,changed)
+        # Read both inputs before modifying either, so a missing or malformed
+        # Mechanical file does not leave the CFD model partly migrated.
         migrate_config(args.config)
+        if thermal_change:
+            path,changed=thermal_change
+            stamp=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            shutil.copy2(path,path.with_name(path.stem+"_before_single_solve_"+stamp+path.suffix))
+            path.write_text(yaml.safe_dump(changed,sort_keys=False),encoding="utf-8")
         return 0
     if args.command == "batch":
         from pipeline.study import main as batch_main

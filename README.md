@@ -1,42 +1,41 @@
 # AE496 — hypersonic nose study for CDR
 
-A planar 2-D Ansys 2025 R1 workflow: **mesh → cold-wall CFD → warm-started adiabatic CFD → spatial convection inputs and aerodynamic forces → Mechanical APDL transient tungsten analysis → individual and comparison plots**.
+A planar 2-D Ansys 2025 R1 study: **mesh → one radiating-wall CFD solve → wall-temperature and aerodynamic exports → separate Mechanical APDL conduction → per-nose and comparison plots**.
 
-## What the two CFD solutions provide
+## What the current model calculates
 
-The restored default follows the method declared in your uploaded original configuration:
-
-1. Solve the steady flow with the nose wall prescribed at 300 K. Export the local cold-wall heat flux.
-2. Read that converged case/data into a second steady solve, change the wall to **Heat Flux = 0 W/m²**, and continue without reinitializing. Export the adiabatic wall/recovery temperature, `T_aw`.
-3. On matching wall faces, derive `h(s) = q_cold_into_solid(s) / (T_aw(s) − T_cold)` and map the face values to the shared boundary nodes for Mechanical.
-4. Solve tungsten conduction in Mechanical using spatial convection inputs `h(s)` and `T_aw(s)`, plus configured radiation. Fluent does not perform the solid transient analysis.
-
-The cold-wall flux is a calibration measurement. It is not held as a fixed heat-flux load throughout solid heating. Mechanical calculates the changing convection load as `h(s) [T_aw(s) − T_solid(s,t)]`.
+Fluent solves a steady compressible gas energy field with an external-radiation wall condition. The approximate local balance is `q_gas = emissivity × sigma × (Tw⁴ − T_environment⁴)`. Fluent solves the equilibrium surface temperature `Tw(s)`; it does not hold the wall at 300 K or set its heat flux to zero. External wall radiation does not require a volumetric gas-radiation model.
 
 ```yaml
 workflow:
-  strategy: two_endpoint
+  strategy: single_solve
 thermal:
-  mode: fixed_temperature
-  wall_temperature_k: 300.0
+  mode: radiative_equilibrium
+  wall_temperature_k: 300.0  # reference metadata; not a prescribed CFD wall temperature
+  emissivity: 0.90
+  external_radiation_temperature_k: 3.0
 ```
 
-The root `thermal` setting describes the cold-wall endpoint. The generated adiabatic endpoint overrides it internally. Flow, geometry, gas properties and mesh are shared; the nose sees airflow toward **−X**. Runtime checks verify that both saved endpoints satisfy their intended wall conditions and residual screens before deriving convection inputs. Heat-flux sign is explicit rather than inferred from an absolute value. Invalid temperature differences, incompatible samples or negative coefficients fail instead of silently producing a load.
+The exported `wall_temperature_K` is **equilibrium surface temperature**, not adiabatic recovery temperature. Separately exported fluid-side static temperatures use wall-face sample coordinates; they are not measurements at a specified distance from the wall. Their interpretation depends on Fluent's sampling and the near-wall mesh.
 
-`h(s)` is an effective coefficient evaluated at the cold-wall reference temperature. It is held fixed through the configured solid exposure. This release does not add an `h(T_wall, flight)` lookup table, a time-varying flight envelope or two-way coupling. Those require additional calibration data or justified correlations.
+Mechanical then **prescribes that steady CFD temperature distribution on the solid surface** and solves transient conduction through tungsten. This is an explicit temperature boundary condition: the surface steps to the imposed field when the load is applied, while the interior warms over physical time. It does not predict gradual surface warm-up. No convection coefficient is derived, and no additional convection, radiation or prescribed heat-flux load is applied on that temperature-constrained boundary. Temperature-constraint reactions are not currently exported as heat load.
+
+This approximation was explicitly selected for the new single-solve model. The uploaded original CFD code contained the radiating-wall branch; the supplied historical Mechanical runner used heat-flux loading and did not establish a previously working prescribed-temperature coupling. See [the evidence and model differences](docs/ORIGINAL_WORKFLOW_COMPARISON.md).
 
 ## Update and run on Windows
 
-The maintained branch is `codex/nose-trade-foundation`. Existing installations update through authenticated Git:
+The maintained Git branch is `codex/nose-trade-foundation`. From your existing AE496 folder:
 
 ```powershell
 .\.venv\Scripts\python.exe study.py update
-.\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after thermal
+if ($LASTEXITCODE -eq 0) {
+    .\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after thermal
+}
 ```
 
-The updater backs up code and configuration under `logs/source_backups/`, preserves CAD and simulation files, migrates case settings to the endpoint workflow, and retains the unchanged mesh. Previous direct-adiabatic results are retained as history; they cannot substitute for a verified cold-wall endpoint. Material and exposure choices are preserved where supported by the migrated loading model.
+The updater backs up source/configuration under `logs/source_backups/`, preserves CAD, meshes and simulation files, and selects the single radiating-wall strategy. Existing explicit numerical controls, flight direction and exposure duration are retained. Prior cold-wall/adiabatic outputs cannot satisfy a radiative-equilibrium export. Meshes with unchanged CAD and mesh settings can be reused; changed solver outputs are retained under `_history/` before a new solve.
 
-If the current installation predates `study.py update`, use a temporary Git checkout:
+For an installation predating `study.py update`, bootstrap through authenticated Git:
 
 ```powershell
 $src = Join-Path $env:TEMP ("AE496-source-" + [guid]::NewGuid().ToString("N"))
@@ -46,105 +45,106 @@ if ($LASTEXITCODE -eq 0) {
 }
 ```
 
-For a case configuration outside `runs/*/_batch`, use `study.py migrate --config "path\to\case.yaml"`. Updates use an owned `.runtime/source_checkout` and Git `--ff-only`; the updater does not reset your project checkout.
+Updates use an owned `.runtime/source_checkout` and Git `--ff-only`. For a case outside `runs/*/_batch`, use `study.py migrate --config "path\to\case.yaml" --thermal-config "path\to\thermal_analysis.yaml"` to back up and convert both input files. Omitting `--thermal-config` converts only the CFD configuration.
 
-For a new nose, prepare and inspect the mesh before solving:
+For new geometry, inspect the mesh before solving:
 
 ```powershell
 .\.venv\Scripts\python.exe study.py run --geometry ".\geometry_batch\blunt_1.x_t" --stop-after mesh
 .\.venv\Scripts\python.exe study.py run --geometry ".\geometry_batch\blunt_1.x_t" --stop-after thermal
 ```
 
-Geometry must be one XY fluid surface: outer farfield minus the body hole. SpaceClaim 251 is selected for this installation. The Fluent 2-D meshing workflow uses a **3-D meshing host** with Prime 2-D enabled; its output mesh and CFD solve are planar 2-D. Inspect shock resolution and the near-wall mesh. No automatic retry removes inflation layers.
+Geometry is one XY fluid surface: outer farfield minus the vehicle profile. The body wall is its inner closed loop. SpaceClaim 251 is retained for this installation. Fluent's Prime 2-D meshing workflow uses a 3-D meshing host; the exported mesh and CFD calculation remain planar 2-D. The current nose points toward +X and flow travels toward **−X**. Inspect the shock and near-wall resolution; no automatic retry removes inflation layers.
 
-To finish the CFD/calibration/aerodynamic stages without starting Mechanical, use `--stop-after aero`. To run batches or regenerate reports without starting Ansys:
+Use `--stop-after aero` to finish CFD exports without Mechanical. Batch execution and offline reporting are:
 
 ```powershell
 .\.venv\Scripts\python.exe study.py batch --batch-config batch.yaml
 .\.venv\Scripts\python.exe study.py report --runs-dir runs
 ```
 
-Set `run_thermal: true` and `thermal_config: ./thermal_analysis.yaml` in `batch.yaml` for the solid stage. Drag and lift are sectional forces in **N/m of span**, exported from the adiabatic endpoint. `Cd` and `Cl` require a justified common `aero.reference_area_per_unit_span_m`; no whole-vehicle or axisymmetric area is guessed.
+`batch.yaml` selects whether to run the solid stage. Drag and lift are sectional forces in **N/m of span** from the single radiating-wall solution. `Cd` and `Cl` require a justified common `aero.reference_area_per_unit_span_m`; a whole-vehicle or axisymmetric reference is not inferred.
 
-## Mechanical inputs and exposure
+## Mechanical settings and physical time
 
-The default `thermal_analysis.yaml` uses `loading.mode: convective_from_cfd`. A manual uniform `h` is no longer required for this strategy; the derived spatial coefficient is the Mechanical input. The older direct-adiabatic strategy remains available with its explicitly specified uniform coefficient.
+```yaml
+loading:
+  mode: prescribed_temperature
+initial_temperature_k: 300.0
+include_radiation: false
+transient:
+  duration_s: 200.0
+```
 
-Mechanical APDL (MAPDL) reconstructs the planar solid boundary from exported CFD vertices and applies `CONV` loads. Tungsten conductivity, density and specific heat belong to this solid stage. The supplied constants (`k = 170 W/(m K)`, `rho = 19250 kg/m³`, `Cp = 130 J/(kg K)`) are approximations that need verification over the relevant temperature range.
+Mechanical APDL reconstructs the solid boundary from actual exported CFD vertices. It interpolates their prescribed wall temperature along each boundary segment to all associated FE boundary nodes, including midside nodes. Mapping coordinates and imposed versus solved temperatures remain available in the saved data.
 
-`transient.duration_s` defaults to **200 seconds**. Initial solid temperature is 300 K, and the restored baseline enables surface radiation with configurable emissivity and surroundings temperature. Neither the emissivity nor constant material properties establishes a validated high-temperature tungsten model. The current calculation holds one flight condition throughout the exposure; changing duration does not create a changing flight envelope.
+Tungsten conductivity, density and heat capacity belong to the solid stage. The supplied constant values—`k = 170 W/(m K)`, `rho = 19250 kg/m³`, `Cp = 130 J/(kg K)`—are configurable approximations requiring verification over the studied temperature range. The initial interior temperature is 300 K. Duration defaults to **200 seconds** and remains configurable. This calculation holds one flight condition and one imposed spatial surface field throughout the exposure; changing duration does not create a changing flight envelope.
 
-Changing only solid material settings or duration reuses valid CFD/calibration results and reruns Mechanical. To rerun the solid analysis directly from a current convection package:
+Changing only material settings or exposure reuses valid CFD exports and reruns Mechanical. The standalone command is:
 
 ```powershell
 .\.venv\Scripts\python.exe study.py thermal --config ".\runs\blunt_1\_batch\config.yaml"
 ```
 
-## Numerical controls and continuation
+## Convergence and continuation
 
-The cold-wall baseline uses hybrid initialization, as declared by the original solver. Courant number and flow scheme are left at Fluent's native defaults unless explicitly configured; the selected values are recorded. The adiabatic endpoint always starts from the screened cold-wall field and does not initialize again.
+The template uses hybrid initialization, 1200 iterations and recorded Fluent native Courant/discretization defaults unless explicitly configured. Migration retains existing explicit controls. The baseline residual targets are **1e-3 for flow and energy**, synchronized with Fluent's native stopping criteria. These targets are not a temperature error bound. Recent temperature/pressure limiting, nonfinite residuals or a failed screen block downstream Mechanical loading.
 
-The default residual screening targets are **1e-3 for flow and energy**, matching the restored baseline rather than the earlier rebuild's tighter `1e-6` energy target. Fluent's native stopping criteria and the script's screen are aligned. These are acceptance thresholds, not temperature error bounds or proof of accuracy. The screen also rejects final temperature/pressure limiting and nonfinite residuals. Failed solves remain available for diagnosis and cannot supply Mechanical loading.
-
-An unconverged but stable endpoint can be continued without discarding its progress:
+For a stable, unconverged single solution, continue the saved field without initializing again:
 
 ```powershell
-.\.venv\Scripts\python.exe study.py continue --config ".\runs\blunt_1\_batch\config.yaml" --endpoint cold_wall --iterations 4800
-.\.venv\Scripts\python.exe study.py continue --config ".\runs\blunt_1\_batch\config.yaml" --endpoint adiabatic --iterations 4800
+.\.venv\Scripts\python.exe study.py continue --config ".\runs\blunt_1\_batch\config.yaml" --iterations 4800
 ```
 
-Use the endpoint which failed. A deliberate Courant change can be supplied with `--courant`; it should be informed by the residual and field behavior. Prior configurations and solutions are backed up. Candidate files are retained for recovery, and an optional raw-history file lock cannot roll back a valid solution. Residual diagnostics live with the corresponding endpoint. Repeated oscillation or clipping requires investigation of numerics, mesh and physics rather than an unlimited iteration budget.
+An optional `--courant` deliberately changes and records that control. Candidate case/data and previous results remain recoverable. Repeated limiting or oscillation requires checking numerics, mesh and physics; extending the iteration budget alone does not establish validity.
 
-`solver_temperature_history.csv`, when enabled and supported by Fluent, is an **optional convergence diagnostic indexed by iteration**. It is not a flight-time history and is not passed to Mechanical. Native measured iteration labels are preserved. Mechanical's `temperature_history.csv` and `wall_temperature_history.csv` use physical seconds.
+`solver_temperature_history.csv` is an optional **CFD convergence diagnostic indexed by Fluent iteration**. It is not a transient solid temperature history and is not a Mechanical load. Mechanical's temperature histories use **physical seconds**. Its whole-solid min/mean/max statistics include boundary nodes; the wall histories show an imposed surface step followed by a constant spatial field.
 
-## Files and plots
+## Saved outputs and plots
 
 ```text
 runs/<nose>/
   _batch/config.yaml
   02_mesh.msh.h5
-  cfd/
-    cold_wall/       # cold-wall case/data, summary and numerical diagnostics
-    adiabatic/       # warm-started adiabatic case/data and diagnostics
-  thermal_bc/
-    convection_nodes.csv
-    convection_summary.json
+  04_final.cas.h5 / 04_final.dat.h5
+  summary.json
   temperature/
-    wall_temperatures.csv
-    wall_temperature_nodes.csv
+    wall_temperatures.csv         # wall-face and separate fluid-side temperatures
+    wall_temperature_nodes.csv   # ordered actual vertices; Mechanical temperature input
     temperature_summary.json
-    fluid_temperature_nodes.csv   # optional supported fluid-node samples
+    fluid_temperature_nodes.csv  # optional supported fluid-node samples
   aero_summary.json
-  thermal_analysis/   # Mechanical temperatures, time histories and figures
-  reports/            # CFD recovery-temperature and derived-h plots
+  thermal_analysis/              # solid physical-time results, fields and animation
+  reports/                       # equilibrium wall/gas profiles and maps
+  solver_diagnostics/
   batch_logs/
   _history/
-runs/comparison/       # recovery temperature, sectional drag/lift comparisons
-  solid/               # physical-time solid histories and final wall profiles
+runs/comparison/
+  radiative_equilibrium_temperature_summary.csv
+  radiative_equilibrium_report.json
+  solid/                         # prescribed-surface and whole-solid comparisons
 ```
 
-Gas exports distinguish wall/recovery temperatures from fluid-side surface values. Face coordinates are wall-face centroids, not fluid-cell centers or a specified offset from the wall. `wall_temperature_nodes.csv` records Fluent's interpolated boundary temperatures. The Mechanical package uses actual boundary vertices with adjacent-length-weighted projections of the collocated face coefficient and recovery temperature. It documents this projection; nodal interpolation need not reproduce every calibration-face heat flux exactly. These temperatures are not transient solid predictions.
+Each nose gets normalized back → nose → back temperature profiles, wall and gas sample maps, optional CFD convergence curves, and separate Mechanical temperature fields and physical-time histories. Enable `visualization.make_gif` for an animation. Comparisons include equilibrium surface temperature versus sectional drag and solid conduction histories. Surface history/profile titles explicitly identify prescribed loading. This mode produces no derived-`h` or fabricated heat-flux plots.
 
-Per-nose and comparison reports include temperature maps, normalized back → nose → back profiles, derived spatial `h`, drag/temperature comparisons, and separate Mechanical temperature fields and physical-time histories. Current reports check endpoint, package and result hashes; stale outputs are excluded. Comparisons separate incompatible flight, physics, mesh, material or exposure settings. Spatial `h` distributions naturally differ by nose and are part of the nose comparison.
+Current reports verify mode, source case/data, temperature input and solid result hashes. Incompatible flight, gas, wall-radiation, mesh, material or exposure settings are excluded or separated. Previously generated calibration/adiabatic figures are removed from current report views; simulation source data remain retained.
 
-Each nose also has a cold-wall calibration flux profile and map. These are labelled calibration data; Mechanical evaluates its changing convection and radiation load separately as the solid warms.
-
-Historical supplied plots remain reproducible explicitly:
+Historical supplied CSVs remain available explicitly:
 
 ```powershell
 .\.venv\Scripts\python.exe study.py report --reference-dir examples/reference_results --output-dir runs/historical_comparison
 ```
 
-Historical CSVs are references, not newly validated endpoint results. The evidence and differences in the uploaded original are documented in [docs/ORIGINAL_WORKFLOW_COMPARISON.md](docs/ORIGINAL_WORKFLOW_COMPARISON.md).
+Historical data are reference fixtures, not newly validated radiative-equilibrium results. The earlier two-endpoint convection and direct-adiabatic/specified-`h` implementations remain compatibility paths for explicitly selected models. They are not required by the active single-solve configuration.
 
-## Validation and CDR use
+## Validation limits
 
-Offline tests cover endpoint conditions and warm starts, sampling and heat-flux sign, spatial convection derivation, numerical screening, configuration migration, result provenance, reporting and Git updates:
+Offline tests cover wall-condition adapters, sampling, prescribed-temperature mapping, numerical screening, source/result provenance, configuration migration, comparisons and Git updates:
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-The cloud environment supports development and offline plots but has no licensed Ansys engines. End-to-end Windows execution is still required. For CDR, assess stable temperatures and forces, conservation, mesh sensitivity, higher-order discretization, gas-property assumptions and the applicability of planar 2-D flow. A residual screen or successful file export does not establish material survivability or an optimum nose.
+The cloud environment has client libraries and offline plotting, but no licensed Fluent or Mechanical engines. Windows execution is still required to verify the live radiating-wall solve and FE conduction. For CDR, assess settled temperatures and forces, conservation, mesh/numerical sensitivity, high-temperature gas and tungsten properties, the planar approximation and the prescribed-surface idealization. Successful exports or a residual screen alone do not establish material survivability or an optimum nose.
 
-A fresh setup uses Python 3.12 or later and `pip install -r requirements.txt`. In the cloud, run `bash scripts/setup_cloud.sh` and source `scripts/activate_cloud.sh`.
+A fresh setup uses Python 3.12 or later and `pip install -r requirements.txt`. Cloud setup uses `bash scripts/setup_cloud.sh`, then `source scripts/activate_cloud.sh`.

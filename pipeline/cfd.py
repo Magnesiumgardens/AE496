@@ -48,6 +48,9 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         quality = require_usable_solution(cfg)
         if endpoint and quality.get("status") != "residual_screen_passed":
             raise ValueError("Endpoint exports require a matching passed residual screen")
+        if (cfg["thermal"].get("mode") == "radiative_equilibrium"
+                and quality.get("status") != "residual_screen_passed"):
+            raise ValueError("Radiative-equilibrium export requires a matching passed residual screen")
     solver = launch_solver(cfg, "export_logs")
     try:
         solver.settings.file.read_case_data(file_name=str(paths["final_case"]))
@@ -67,12 +70,27 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
             from .endpoint_export import export_endpoint
             result["endpoint"] = export_endpoint(solver,cfg,walls)
         if thermal:
-            print("[export] Saving adiabatic gas/recovery temperatures...", flush=True)
+            mode = cfg["thermal"]["mode"]
+            label = ("radiative-equilibrium wall and near-wall fluid temperatures"
+                     if mode == "radiative_equilibrium" else "adiabatic gas/recovery temperatures")
+            print(f"[export] Saving {label}...", flush=True)
             result["temperatures"] = export_temperatures(solver, cfg, walls)
             result["temperatures"]["source_sha256"] = {
                 key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
             result["temperatures"]["wall_csv_sha256"] = file_sha256(temperature_paths(cfg)[0])
             atomic_json(temperature_paths(cfg)[1], result["temperatures"])
+            if mode == "radiative_equilibrium":
+                # The exported field is authoritative when the optional native
+                # report adapter could not provide the final solver summary.
+                import json
+                metadata = json.loads(paths["summary"].read_text(encoding="utf-8")) if paths["summary"].exists() else {}
+                stats = result["temperatures"]["wall_temperature"]
+                metadata.update(wall_temperature_min_k=stats["minimum_K"],
+                                wall_temperature_avg_k=stats["length_weighted_mean_K"],
+                                wall_temperature_max_k=stats["maximum_K"])
+                metadata["wall_temperature_report"] = {"status": "complete", "source": "saved_boundary_temperature_field",
+                    "meaning": "Steady radiative-equilibrium wall temperature; not adiabatic recovery temperature"}
+                atomic_json(paths["summary"], metadata)
             print("[export] Temperatures saved:", result["temperatures"]["wall_temperatures_csv"], flush=True)
         if aero:
             try:
@@ -95,7 +113,7 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
 def export_cli(thermal=True, aero=True):
     import argparse
     from .config import load_config
-    parser = argparse.ArgumentParser(description="Export saved adiabatic temperatures and aerodynamic forces")
+    parser = argparse.ArgumentParser(description="Export solved wall/fluid temperatures and aerodynamic forces")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--inspect-fields", action="store_true")
     args = parser.parse_args()

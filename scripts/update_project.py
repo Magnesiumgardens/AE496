@@ -15,7 +15,8 @@ import yaml
 
 # The initial helper runs from a freshly fetched source checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pipeline.migration import endpoint_config, endpoint_state, endpoint_thermal_config, endpoint_batch_config
+from pipeline.migration import (single_solve_config, single_solve_state,
+                                single_solve_thermal_config, single_solve_batch_config)
 
 
 def git(repository, *args):
@@ -32,6 +33,7 @@ def update_project(root, source, revision=None):
         (name.endswith(".py") and ("/" not in name or name.startswith(("pipeline/", "scripts/", "tests/"))))
         or name in ("README.md", "NOSE_TRADE_README.md", "requirements.txt", "thermal_analysis.yaml")
         or (name.startswith("docs/") and name.endswith(".md"))
+        or name.startswith("tests/fixtures/")
         or name.startswith("examples/reference_results/")]
     payload = {name: git(source, "show", f"{revision}:{name}") for name in selected}
     for name, data in payload.items():
@@ -39,25 +41,25 @@ def update_project(root, source, revision=None):
     config_paths = [root / "config.yaml", *sorted((root / "runs").glob("*/_batch/config.yaml"))]
     for path in config_paths:
         old = yaml.safe_load(path.read_bytes()) if path.is_file() else yaml.safe_load(git(source, "show", f"{revision}:config.yaml"))
-        new = endpoint_config(old)
+        new = single_solve_config(old)
         if old != new or not path.is_file():
             payload[str(path.relative_to(root))] = yaml.safe_dump(new, sort_keys=False).encode()
             state_path = path.parent / "stage_state.json"
             if path.parent.name == "_batch" and state_path.is_file():
                 state = json.loads(state_path.read_text(encoding="utf-8"))
-                payload[str(state_path.relative_to(root))] = (json.dumps(endpoint_state(state), indent=2) + "\n").encode()
+                payload[str(state_path.relative_to(root))] = (json.dumps(single_solve_state(state), indent=2) + "\n").encode()
     batch_path = root / "batch.yaml"
     batch = yaml.safe_load(batch_path.read_bytes()) if batch_path.is_file() else yaml.safe_load(git(source, "show", f"{revision}:batch.yaml"))
-    batch = endpoint_batch_config(batch)
+    batch = single_solve_batch_config(batch)
     payload["batch.yaml"] = yaml.safe_dump(batch, sort_keys=False).encode()
     thermal_path = root / "thermal_analysis.yaml"
     if thermal_path.is_file():
         previous = yaml.safe_load(thermal_path.read_bytes()) or {}
-        if (previous.get("loading", {}) or {}).get("mode") == "convective_from_cfd":
-            # Existing endpoint exposure/material values are inputs, not code.
+        new_thermal = single_solve_thermal_config(previous, yaml.safe_load(payload["thermal_analysis.yaml"]))
+        if previous == new_thermal:
+            # Preserve exact YAML/comment formatting for an already current input.
             payload.pop("thermal_analysis.yaml", None)
         else:
-            new_thermal = endpoint_thermal_config(previous, yaml.safe_load(payload["thermal_analysis.yaml"]))
             payload["thermal_analysis.yaml"] = yaml.safe_dump(new_thermal, sort_keys=False).encode()
     originals = {}
     for name in payload:
@@ -89,9 +91,9 @@ def update_project(root, source, revision=None):
             raise
     print(f"[update] Installed complete study from {revision}")
     print(f"[update] Previous code/configs saved: {backup}")
-    print("[update] Two-endpoint CFD calibration restored. Existing meshes and simulation results are retained.")
-    print("[update] Migrated cases reuse their mesh, then run cold-wall and warm-started adiabatic CFD.")
-    print("[update] Mechanical uses the derived spatial h; material choices and exposure durations are retained.")
+    print("[update] Single radiative-equilibrium CFD selected; existing meshes and simulation results retained.")
+    print("[update] CFD numerical controls, material choices and exposure durations are retained.")
+    print("[update] Mechanical prescribes the imported wall temperature; it does not predict surface warm-up.")
     return backup
 
 

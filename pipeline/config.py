@@ -40,10 +40,10 @@ def _validate_solver(solver, prefix="solver", native=False):
     if courant is not None:
         positive(prefix + ".courant_number", courant)
     elif not native:
-        raise ConfigError(prefix + ".courant_number=null is supported only for the two-endpoint native baseline")
+        raise ConfigError(prefix + ".courant_number=null requires a workflow with native startup controls")
     scheme = solver.get("flow_scheme", "first-order-upwind")
     if scheme is None and not native:
-        raise ConfigError(prefix + ".flow_scheme=null is supported only for the two-endpoint native baseline")
+        raise ConfigError(prefix + ".flow_scheme=null requires a workflow with native startup controls")
     if scheme is not None and (not isinstance(scheme, str) or not scheme.strip()):
         raise ConfigError(prefix + ".flow_scheme must be a nonempty scheme name or null")
     thresholds = solver.get("residual_thresholds", {})
@@ -82,9 +82,19 @@ def validate_config(cfg):
     if not isinstance(workflow, dict):
         raise ConfigError("workflow must contain a mapping")
     strategy = workflow.get("strategy")
-    if strategy not in (None, "two_endpoint"):
-        raise ConfigError("workflow.strategy must be two_endpoint when specified")
-    if strategy == "two_endpoint":
+    if strategy not in (None, "two_endpoint", "single_solve"):
+        raise ConfigError("workflow.strategy must be single_solve or two_endpoint when specified")
+    if strategy == "single_solve":
+        if cfg["thermal"]["mode"] != "radiative_equilibrium":
+            raise ConfigError("The single-solve workflow requires thermal.mode=radiative_equilibrium")
+        emissivity = positive("thermal.emissivity", _required(cfg, "thermal.emissivity"))
+        if emissivity > 1:
+            raise ConfigError("thermal.emissivity must be greater than zero and at most one")
+        positive("thermal.external_radiation_temperature_k",
+                 _required(cfg, "thermal.external_radiation_temperature_k"))
+        if "wall_temperature_k" in cfg["thermal"]:
+            positive("thermal.wall_temperature_k (reference only)", cfg["thermal"]["wall_temperature_k"])
+    elif strategy == "two_endpoint":
         internal_adiabatic = cfg.get("_endpoint_kind") == "adiabatic" and cfg.get("_study_work_dir")
         if internal_adiabatic:
             if cfg["thermal"] != {"mode": "adiabatic"}:
@@ -111,7 +121,7 @@ def validate_config(cfg):
         # their physical model. The updater performs the explicit migration.
         if cfg["thermal"]["mode"] != "adiabatic":
             raise ConfigError("Without workflow.strategy, this case requires thermal.mode=adiabatic. "
-                              "Run study.py migrate --config <case.yaml> to restore the two-endpoint workflow.")
+                              "Run study.py migrate --config <case.yaml> to select the single-solve workflow.")
         if set(cfg["thermal"]) - {"mode"}:
             raise ConfigError("A direct adiabatic configuration must contain only thermal.mode")
     if cfg["geometry"].get("input_kind", "prepared_fluid_surface") != "prepared_fluid_surface":
@@ -122,13 +132,13 @@ def validate_config(cfg):
     processors = positive("runtime.processors", runtime.get("processors", 4))
     if not processors.is_integer():
         raise ConfigError("runtime.processors must be an integer")
-    _validate_solver(cfg["solver"], native=strategy == "two_endpoint")
+    _validate_solver(cfg["solver"], native=strategy in ("two_endpoint", "single_solve"))
     for name in ("geometry_start_timeout_s", "fluent_start_timeout_s"):
         positive("runtime." + name, runtime.get(name, 300))
     release_delay = float(runtime.get("meshing_release_delay_s", 10))
     if not math.isfinite(release_delay) or release_delay < 0 or release_delay > 60:
         raise ConfigError("runtime.meshing_release_delay_s must be in [0, 60]")
-    if strategy != "two_endpoint" and cfg.get("thermal_export", {}).get("enabled", False):
+    if strategy not in ("two_endpoint", "single_solve") and cfg.get("thermal_export", {}).get("enabled", False):
         raise ConfigError("Heat-load export is incompatible with this adiabatic study; migrate the config.")
     if strategy == "two_endpoint":
         cold_export = cfg.get("thermal_export", {})

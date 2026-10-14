@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def config(work):
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
     # These regressions exercise the earlier direct-adiabatic path explicitly;
-    # the application template now selects two-endpoint calibration.
+    # the application template now selects one radiative-equilibrium solve.
     cfg.pop("workflow", None)
     cfg.pop("thermal_export", None)
     cfg["thermal"] = {"mode": "adiabatic"}
@@ -156,14 +156,15 @@ class AdiabaticPhysicsTests(unittest.TestCase):
             new = load_config(path)
             self.assertEqual(new["mesh"], cfg["mesh"])
             self.assertEqual(new["flight"], cfg["flight"])
-            self.assertEqual(new["workflow"]["strategy"], "two_endpoint")
-            self.assertEqual(new["thermal"], {"mode":"fixed_temperature", "wall_temperature_k":300})
-            self.assertEqual(new["thermal_export"]["heat_flux_into_wall_sign"], -1)
+            self.assertEqual(new["workflow"]["strategy"], "single_solve")
+            self.assertEqual(new["thermal"], {"mode":"radiative_equilibrium", "wall_temperature_k":300,
+                                              "emissivity":.9, "external_radiation_temperature_k":3})
+            self.assertNotIn("thermal_export", new)
             state = json.loads(state_path.read_text())["stages"]
             self.assertEqual(state["mesh"], {"status": "complete", "fingerprint": "same"})
             self.assertEqual(state["solver"]["status"], "stale")
             self.assertEqual(state["thermal"]["status"], "stale")
-            self.assertEqual(len(list(path.parent.glob("config_before_two_endpoint*"))), 1)
+            self.assertEqual(len(list(path.parent.glob("config_before_single_solve*"))), 1)
 
     def test_solid_thermal_runner_requires_h_before_launch(self):
         from pipeline.thermal import run_thermal_analysis
@@ -277,11 +278,12 @@ class FullUpdateTests(unittest.TestCase):
             (target / "thermal_analysis.yaml").write_text(yaml.safe_dump(thermal))
             backup = update_project(target, source)
             installed = yaml.safe_load((target / "thermal_analysis.yaml").read_text())
-            self.assertEqual(installed["loading"]["mode"], "convective_from_cfd")
+            self.assertEqual(installed["loading"]["mode"], "prescribed_temperature")
             self.assertNotIn("heat_transfer_coefficient_w_m2k", installed["loading"])
             self.assertEqual(installed["transient"]["duration_s"], 180)
             self.assertEqual(load_config(case / "_batch/config.yaml")["thermal"],
-                             {"mode":"fixed_temperature", "wall_temperature_k":300})
+                             {"mode":"radiative_equilibrium", "wall_temperature_k":300,
+                              "emissivity":.9, "external_radiation_temperature_k":3})
             self.assertEqual(load_config(case / "_batch/config.yaml")["flight"]["mach"], 7)
             self.assertEqual((case / "02_mesh.msh.h5").read_bytes(), b"keep this mesh")
             self.assertEqual((case / "04_final.dat.h5").read_bytes(), b"keep previous solution")

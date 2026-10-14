@@ -1,4 +1,4 @@
-"""Adiabatic wall and fluid-side static temperatures from a solved Fluent case."""
+"""Solved wall and fluid-side static temperatures from a saved Fluent case."""
 from pathlib import Path
 import csv
 import os
@@ -47,8 +47,11 @@ def export_temperatures(solver, cfg, wall_zones):
     from ansys.fluent.core.fields.field_data_interfaces import (
         ScalarFieldDataRequest, SurfaceFieldDataRequest, SurfaceDataType,
     )
-    if cfg["thermal"] != {"mode": "adiabatic"}:
-        raise ValueError("Temperature export requires the adiabatic no-heat-transfer model")
+    mode = cfg["thermal"].get("mode")
+    if mode not in ("adiabatic", "radiative_equilibrium"):
+        raise ValueError("Temperature export requires an adiabatic or radiative-equilibrium solution")
+    if mode == "adiabatic" and cfg["thermal"] != {"mode": "adiabatic"}:
+        raise ValueError("Adiabatic temperature export requires only thermal.mode=adiabatic")
     base = cfg["geometry"].get("body_wall_name", "body_wall")
     if not wall_zones or any(z != base and not z.startswith(base + ".") for z in wall_zones):
         raise ValueError("Select only the named body-wall zones")
@@ -110,7 +113,10 @@ def export_temperatures(solver, cfg, wall_zones):
         weights = np.asarray([row["segment_length_m"] for row in rows])
         return dict(minimum_K=float(values.min()), maximum_K=float(values.max()),
                     length_weighted_mean_K=float(np.average(values, weights=weights)))
-    summary = dict(status="complete", thermal_mode="adiabatic", wall_temperatures_csv=str(csv_path),
+    meaning = ("Wall values are steady radiative-equilibrium temperatures, not adiabatic recovery temperatures."
+               if mode == "radiative_equilibrium" else
+               "Wall values are adiabatic recovery temperatures, not transient solid temperatures.")
+    summary = dict(status="complete", thermal_mode=mode, wall_temperatures_csv=str(csv_path),
         temperature_export_signature=settings,
         conditions=temperature_conditions(cfg),
         face_count=len(rows), body_wall_zones=list(wall_zones), static_temperature_field=field,
@@ -119,18 +125,35 @@ def export_temperatures(solver, cfg, wall_zones):
                       fluid_side="node_value=False, boundary_value=False",
                       coordinates="Wall-face centroids; not fluid-cell centers or a specified offset distance"),
         limitations=["Fluid-side surface values depend on Fluent's boundary-value support and the near-wall mesh.",
-                     "Wall values are adiabatic recovery temperatures, not transient solid temperatures."])
+                     meaning])
+    if mode == "radiative_equilibrium":
+        summary["thermal_driver"] = "wall_temperature_K"
+        summary["solid_loading"] = "Prescribed surface temperature; the solid surface follows the CFD equilibrium field"
+        reference = cfg["thermal"].get("wall_temperature_k")
+        # This check detects the historical 300 K cold-wall artifact without
+        # substituting gas-side temperature for the solved wall-temperature field.
+        if reference is not None:
+            temperatures = np.asarray([row["wall_temperature_K"] for row in rows])
+            summary["wall_matches_reference_temperature"] = bool(np.allclose(
+                temperatures, float(reference), rtol=1e-7, atol=1e-6))
+            if summary["wall_matches_reference_temperature"]:
+                summary["limitations"].append(
+                    "The entire exported wall matches the reference temperature; verify that the radiating solution evolved.")
+                print("[temperature] Warning: the entire solved wall matches the reference temperature; "
+                      "verify that the radiating solution evolved.", flush=True)
     atomic_csv(csv_path, rows)
     # Follow connectivity and keep actual CFD vertices, not face centroids, for
-    # reconstructing the solid and mapping the convection recovery temperature.
+    # reconstructing the solid and mapping the specified wall thermal driver.
     current = min((p for r in records for p in (r["start"], r["end"])), key=lambda p: tuple(p[:2]))
     node_rows = []
     for index, record in enumerate(records):
         forward = np.linalg.norm(current - record["start"]) <= float(settings.get("topology_tolerance_m", 1e-9))
         point = record["start"] if forward else record["end"]
         temperature = record["start_temperature_K"] if forward else record["end_temperature_K"]
-        node_rows.append(dict(surface_order_index=index, x_m=float(point[0]), y_m=float(point[1]),
-                              z_m=float(point[2]), recovery_temperature_K=temperature))
+        row = dict(surface_order_index=index, x_m=float(point[0]), y_m=float(point[1]),
+                   z_m=float(point[2]))
+        row["wall_temperature_K" if mode == "radiative_equilibrium" else "recovery_temperature_K"] = temperature
+        node_rows.append(row)
         current = record["end"] if forward else record["start"]
     node_path = csv_path.parent / "wall_temperature_nodes.csv"
     atomic_csv(node_path, node_rows)

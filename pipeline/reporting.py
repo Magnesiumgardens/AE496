@@ -196,7 +196,7 @@ def _save(fig, path, plt, dpi=160):
     return str(path)
 
 
-def _wall_plots(history, profiles, directory, comparison=True, colors=None):
+def _wall_plots(history, profiles, directory, comparison=True, colors=None, prescribed=False):
     plt = _plotting()
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -210,10 +210,16 @@ def _wall_plots(history, profiles, directory, comparison=True, colors=None):
             if not values:
                 continue
             time = [float(r["time_s"]) for r in values]
-            ax.plot(time, [float(r["max_wall_temperature_K"]) for r in values], color=colors[name], label=name)
-            ax.plot(time, [float(r["mean_wall_temperature_K"]) for r in values], color=colors[name], linestyle="--")
+            plotting = ax.step if prescribed else ax.plot
+            style = {"where":"pre"} if prescribed else {}
+            plotting(time, [float(r["max_wall_temperature_K"]) for r in values], color=colors[name], label=name, **style)
+            plotting(time, [float(r["mean_wall_temperature_K"]) for r in values], color=colors[name], linestyle="--", **style)
         ax.set(xlabel="Time [s]", ylabel="Wall temperature [K]",
-               title="Wall Temperature History" + (" Comparison" if comparison else "") + " (solid=max, dashed=simple mean)")
+               title=("Prescribed Surface Temperature" if prescribed else "Wall Temperature History") +
+                     (" Comparison" if comparison else "") + " (solid=max, dashed=simple mean)")
+        if prescribed:
+            ax.text(0.02, 0.02, "Surface temperature is imposed immediately; this curve does not predict surface warm-up.",
+                    transform=ax.transAxes, fontsize=8)
         ax.grid(alpha=0.3)
         ax.legend()
         created["wall_temperature_history_png"] = _save(fig, directory / "wall_temperature_history_comparison.png", plt)
@@ -229,7 +235,7 @@ def _wall_plots(history, profiles, directory, comparison=True, colors=None):
                     color=colors[name], label=name)
         time_label = f"t={next(iter(times)):g} s" if len(times) == 1 else "different final times; see CSV"
         ax.set(xlabel="Normalized distance along wall, back → nose → back, s*", ylabel="Wall temperature [K]",
-               title=f"Final Wall Temperature ({time_label})", xlim=(0, 1))
+               title=f"{'Prescribed Surface Temperature' if prescribed else 'Final Wall Temperature'} ({time_label})", xlim=(0, 1))
         ax.grid(alpha=0.3)
         ax.legend()
         created["final_wall_temperature_normalized_png"] = _save(fig, directory / "final_wall_temperature_normalized_position.png", plt)
@@ -242,6 +248,7 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
     runs_dir, output_dir = Path(runs_dir), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     histories, profiles, summaries, warnings = [], [], [], []
+    prescribed_cases, solid_histories = set(), {}
     validated_raw_design = None
     design_order = [directory.name for directory in sorted(runs_dir.iterdir())
                     if (directory / "thermal_analysis/wall_temperature_history.csv").is_file()] if runs_dir.is_dir() else []
@@ -261,6 +268,9 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
         try:
             cfg_path = directory / "_batch/config.yaml"
             cfg = load_yaml(cfg_path) if cfg_path.is_file() else {}
+            thermal_summary = read_json(directory / "thermal_analysis/thermal_summary.json")
+            prescribed = thermal_summary.get("loading_mode") == "prescribed_temperature"
+            if prescribed:prescribed_cases.add(directory.name)
             history, profile, summary = summarize_wall_history(read_csv(raw), directory.name,
                 cfg.get("reporting", {}).get("nose_direction", [1, 0]))
             histories.extend(history)
@@ -269,8 +279,10 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
             report_dir = directory / "reports"
             write_csv(report_dir / "wall_temperature_history_summary.csv", history)
             write_csv(report_dir / "final_wall_temperature.csv", profile)
-            _wall_plots(history, profile, report_dir, comparison=False, colors=colors)
+            _wall_plots(history, profile, report_dir, comparison=False, colors=colors, prescribed=prescribed)
             _source_wall_plots(read_csv(raw), report_dir)
+            solid_history = directory / "thermal_analysis/temperature_history.csv"
+            if solid_history.is_file():solid_histories[directory.name] = read_csv(solid_history)
             saved_arrays = directory / "thermal_analysis/thermal_snapshots.npz"
             if saved_arrays.is_file():
                 with np.load(saved_arrays, allow_pickle=False) as arrays:
@@ -280,9 +292,11 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
                                          mean_K=float(np.mean(s["temperature_K"])), maximum_K=float(np.max(s["temperature_K"])))
                                     for s in snapshots]
                     summary = read_json(directory / "thermal_analysis/thermal_summary.json")
+                    visualization = dict(summary.get("visualization_settings", {"make_gif": False}))
+                    visualization["loading_mode"] = summary.get("loading_mode")
                     create_thermal_visualizations(directory / "thermal_analysis", arrays["boundary_xy_m"],
                         arrays["boundary_flux_W_m2"] if "boundary_flux_W_m2" in arrays else np.zeros(len(arrays["boundary_xy_m"])), arrays["coordinates_m"], node_history, snapshots,
-                        summary.get("visualization_settings", {"make_gif": False}))
+                        visualization)
         except (ValueError, KeyError, TypeError) as exc:
             warnings.append(f"{directory.name}: {exc}")
     if reference_dir is not None:
@@ -339,19 +353,37 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
             write_csv(directory / "wall_temperature_history_summary.csv", case_history)
         if case_profile:
             write_csv(directory / "final_wall_temperature.csv", case_profile)
-        _wall_plots(case_history, case_profile, directory, comparison=False, colors=colors)
+        _wall_plots(case_history, case_profile, directory, comparison=False, colors=colors,
+                    prescribed=name in prescribed_cases)
     created = {}
     for filename, records in (("wall_temperature_history_comparison.csv", histories),
                               ("final_wall_temperature_normalized_position.csv", profiles),
                               ("temperature_comparison_summary.csv", summaries)):
         if records:
             created[filename[:-4]] = str(write_csv(output_dir / filename, records))
-    created.update(_wall_plots(histories, profiles, output_dir, colors=colors))
+    current_names = {row["design"] for row in histories + profiles}
+    prescribed_comparison = bool(current_names) and current_names <= prescribed_cases
+    created.update(_wall_plots(histories, profiles, output_dir, colors=colors, prescribed=prescribed_comparison))
+    if solid_histories:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for name, records in solid_histories.items():
+            times = [float(row["time_s"]) for row in records]
+            for field, style, label in (("maximum_K", "-", "max"), ("mean_K", "--", "nodal mean"),
+                                        ("minimum_K", ":", "min")):
+                ax.plot(times, [float(row[field]) for row in records], linestyle=style,
+                        color=colors[name], label=name + " " + label)
+        ax.set(xlabel="Physical time [s]", ylabel="Solid temperature [K]",
+               title="Mechanical solid temperature comparison (all saved solid nodes)")
+        ax.legend()
+        ax.grid(alpha=.3)
+        created["solid_temperature_history_comparison"] = _save(fig, output_dir / "solid_temperature_history_comparison.png", plt)
     created.update(create_trade_outputs(runs_dir, rows, output_dir))
     manifest = dict(status="complete" if not warnings else "partial", warnings=warnings,
                     wall_mean_definition="simple arithmetic mean of saved wall samples; not area weighted",
                     normalization="rear→nose→rear; physical arc length on each side maps to half-range",
                     reference_data="Imported historical data are report fixtures, not new simulation results.",
+                    prescribed_surface_cases=sorted(prescribed_cases),
+                    surface_interpretation="Prescribed cases impose the steady CFD surface temperature as a step; physical-time conduction changes the solid interior, not the imposed surface.",
                     validated_unlabeled_wall_design=validated_raw_design,
                     outputs=created)
     manifest_path = output_dir / "report_manifest.json"
@@ -378,6 +410,9 @@ def _source_wall_plots(records, directory):
     _save(fig, directory / "wall_boundary.png", plt)
     flux_key = next((key for key in ("net_surface_heat_flux_into_wall_W_m2", "convective_heat_flux_into_wall_W_m2",
                                     "applied_heat_flux_into_wall_W_m2") if rows and key in rows[0]), None)
+    if not flux_key:
+        for name in ("final_wall_heat_flux_map.png", "final_wall_heat_flux_profile.png"):
+            (directory / name).unlink(missing_ok=True)
     if flux_key:
         q = np.array([float(row[flux_key]) for row in rows])
         fig, ax = plt.subplots(figsize=(9, 4))
@@ -398,6 +433,10 @@ def _source_wall_plots(records, directory):
 
 def create_thermal_visualizations(output_dir, boundary_xy, boundary_q, xyz, history, snapshots, viz_cfg):
     """Render MAPDL arrays plus wall mapping; FE results remain authoritative."""
+    prescribed = viz_cfg.get("loading_mode") == "prescribed_temperature"
+    if prescribed:
+        for name in ("applied_heat_flux_map.png", "applied_heat_flux_position.png"):
+            (Path(output_dir) / "visualization" / name).unlink(missing_ok=True)
     if not viz_cfg.get("enabled", True):
         return {}
     if not snapshots:
@@ -456,10 +495,10 @@ def create_thermal_visualizations(output_dir, boundary_xy, boundary_q, xyz, hist
     fig, ax = plt.subplots(figsize=(9, 4))
     ax.plot(distance, final[nearest])
     ax.set(xlabel="Distance along supplied wall order [m]", ylabel="Wall temperature [K]",
-           title=f"Final Wall Temperature (t={time:g} s)")
+           title=f"{'Prescribed Surface Temperature' if prescribed else 'Final Wall Temperature'} (t={time:g} s)")
     ax.grid(alpha=0.3)
     created["final_wall_temperature_png"] = _save(fig, output_dir / "final_wall_temperature.png", plt, dpi)
-    if viz_cfg.get("save_heat_flux_image", True):
+    if not prescribed and viz_cfg.get("save_heat_flux_image", True):
         fig, ax = axes("Applied Cold-Wall Aerothermal Heat Flux")
         points = ax.scatter(xy[:, 0], xy[:, 1], c=q, s=18)
         outline(ax)
@@ -475,7 +514,7 @@ def create_thermal_visualizations(output_dir, boundary_xy, boundary_q, xyz, hist
         fig, ax = plt.subplots(figsize=(9, 5))
         for key, label in (("minimum_K", "Minimum"), ("mean_K", "Nodal mean"), ("maximum_K", "Maximum")):
             ax.plot([r["time_s"] for r in history], [r[key] for r in history], label=label)
-        ax.set(xlabel="Time [s]", ylabel="Temperature [K]", title="Solid Temperature History")
+        ax.set(xlabel="Physical time [s]", ylabel="Temperature [K]", title="Mechanical Solid Temperature History (all saved solid nodes)")
         ax.grid(alpha=0.3)
         ax.legend()
         created["temperature_history_png"] = _save(fig, output_dir / "temperature_history.png", plt, dpi)

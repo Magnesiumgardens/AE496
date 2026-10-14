@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def template():
-    return yaml.safe_load((ROOT / "config.yaml").read_text())
+    return yaml.safe_load((ROOT / "tests/fixtures/two_endpoint_config.yaml").read_text())
 
 
 def old_adiabatic():
@@ -41,7 +41,7 @@ class EndpointConfigurationTests(unittest.TestCase):
         self.assertIsNone(cfg["solver"]["courant_number"])
         self.assertIsNone(cfg["solver"]["flow_scheme"])
         self.assertEqual(set(cfg["solver"]["residual_thresholds"].values()), {1e-3})
-        thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
+        thermal = yaml.safe_load((ROOT / "tests/fixtures/endpoint_thermal_analysis.yaml").read_text())
         self.assertEqual(thermal["loading"]["mode"], "convective_from_cfd")
         self.assertEqual(thermal["transient"]["duration_s"], 200)
         self.assertNotIn("heat_transfer_coefficient_w_m2k", thermal["loading"])
@@ -156,7 +156,7 @@ class EndpointConfigurationTests(unittest.TestCase):
             restored = json.loads(state_path.read_text())
             self.assertEqual(restored["stages"]["mesh"], mesh)
             self.assertTrue(all(record["status"] == "stale" for stage, record in restored["stages"].items() if stage != "mesh"))
-            backups = list(path.parent.glob("config_before_two_endpoint_*.yaml"))
+            backups = list(path.parent.glob("config_before_single_solve_*.yaml"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_bytes(), original)
 
@@ -191,13 +191,13 @@ class EndpointInstallerTests(unittest.TestCase):
             (target / "thermal_analysis.yaml").write_text(yaml.safe_dump(thermal))
             backup = update_project(target, source)
             migrated = yaml.safe_load((case / "_batch/config.yaml").read_text())
-            self.assertEqual(migrated["workflow"]["strategy"], "two_endpoint")
+            self.assertEqual(migrated["workflow"]["strategy"], "single_solve")
             self.assertEqual(migrated["flight"]["mach"], 7.5)
             self.assertEqual(migrated["mesh"]["body_min_size"], .00012)
             restored_thermal = yaml.safe_load((target / "thermal_analysis.yaml").read_text())
             self.assertEqual(restored_thermal["transient"]["duration_s"], 175)
             self.assertEqual(restored_thermal["material"]["conductivity_w_mk"], 140)
-            self.assertEqual(restored_thermal["loading"]["mode"], "convective_from_cfd")
+            self.assertEqual(restored_thermal["loading"]["mode"], "prescribed_temperature")
             self.assertNotIn("heat_transfer_coefficient_w_m2k", restored_thermal["loading"])
             self.assertEqual(json.loads((case / "_batch/stage_state.json").read_text())["stages"]["mesh"], mesh)
             for name, data in artifacts.items():self.assertEqual((case / name).read_bytes(), data)

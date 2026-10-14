@@ -1,6 +1,6 @@
-# Steady planar CFD calibration followed by a separate Mechanical solid solve.
-# The cold-wall solution supplies heating; a warm-started adiabatic reference
-# supplies recovery temperature. Their combination gives spatial convection h.
+# One steady planar CFD solve with an externally radiating equilibrium wall.
+# Mechanical then PRESCRIBES the solved surface temperature and predicts
+# conduction into the tungsten; it does not predict the surface warm-up.
 # Batch generates a separate case config and work directory for each CAD file.
 
 project:
@@ -63,17 +63,15 @@ physics:
     sutherland_effective_temperature_k: 110.56
 
 workflow:
-  strategy: two_endpoint
-  # Additional iterations after changing the converged cold wall to q''=0.
-  # This reference starts from saved cold-wall case/data without initialization.
-  adiabatic_reference_iterations: 600
-  min_delta_temperature_k: 25.0
-  coordinate_tolerance_m: 1.0e-9
+  strategy: single_solve
 
 thermal:
-  # Calibration endpoint, not the temperature imposed on the transient solid.
-  mode: fixed_temperature
+  # Fluent solves Tw from gas-side heating and external radiative loss.
+  mode: radiative_equilibrium
+  # Reference only: this is not the prescribed Fluent wall temperature.
   wall_temperature_k: 300.0
+  emissivity: 0.90
+  external_radiation_temperature_k: 3.0
 
 solver:
   density_solver: density-based-implicit
@@ -102,16 +100,6 @@ temperature_export:
   static_temperature_field: temperature
   # Optional nodal fluid map; wall and fluid-side face temperatures are required.
   export_fluid_nodes: true
-
-thermal_export:
-  enabled: true
-  output_directory: thermal_bc
-  temperature_field_name: temperature
-  heat_flux_field_name: heat-flux
-  # Verified convention for Fluent's cold-wall total surface heat-flux field:
-  # negative native values mean heat leaving the fluid and entering the solid.
-  heat_flux_into_wall_sign: -1.0
-  min_delta_temperature_k: 25.0
 
 outputs:
   write_case_data: true

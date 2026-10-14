@@ -1,16 +1,15 @@
-# Separate Mechanical APDL solid solve using matched CFD calibration endpoints.
-# h(s)=q_cold(s)/(T_aw(s)-T_cold); Mechanical evaluates h(s)*(T_aw(s)-T_wall).
+# Separate Mechanical APDL solid solve with a prescribed CFD wall temperature.
+# The imported equilibrium temperature is enforced at the surface; this model
+# predicts conduction into tungsten, not a convective surface warm-up.
 mapdl_version: 251
 processors: 4
 mesh_size_m: null
 initial_temperature_k: 300.0
-include_radiation: true
+include_radiation: false
 emissivity: 0.9
 radiation_temperature_k: 226.5
 loading:
-  mode: convective_from_cfd
-  # Reject ill-conditioned endpoint ratios instead of guessing or clipping h.
-  min_delta_temperature_k: 25.0
+  mode: prescribed_temperature
 material:
   name: Tungsten
   # Constant-property approximation: verify values for the relevant temperature range.

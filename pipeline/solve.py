@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import math
 
-from .aero import reference_state, report_scalar
+from .aero import reference_state, report_scalar, wall_thermal_state
 from .cfd import launch_solver
 
 from .utils import work_paths
@@ -49,6 +50,23 @@ def _matching_zone_names(bc, base_name: str) -> list[str]:
     return sorted(set(matches))
 
 def _set_wall_thermal(wall, thermal_cfg: dict) -> dict:
+    if thermal_cfg.get("mode") == "radiative_equilibrium":
+        thermal = wall.thermal
+        allowed = thermal.thermal_condition.allowed_values()
+        radiation = next((value for value in allowed
+                          if str(value).casefold() == "radiation"), None)
+        if radiation is None:
+            raise SolverPipelineError(
+                "thermal.mode=radiative_equilibrium requires Fluent's wall Radiation condition; "
+                f"this session exposes {allowed!r}")
+        thermal.thermal_condition = radiation
+        thermal.external_emissivity.option = "value"
+        thermal.external_emissivity.value = float(thermal_cfg["emissivity"])
+        thermal.ext_rad_temperature.option = "value"
+        thermal.ext_rad_temperature.value = float(thermal_cfg["external_radiation_temperature_k"])
+        # Verify native readback. wall_temperature_k is a reference; never set
+        # the Temperature or Heat Flux branches for this mode.
+        return wall_thermal_state(thermal, thermal_cfg)
     if thermal_cfg.get("mode") == "fixed_temperature":
         temperature = float(thermal_cfg["wall_temperature_k"])
         wall.thermal.thermal_condition = "Temperature"
@@ -56,7 +74,7 @@ def _set_wall_thermal(wall, thermal_cfg: dict) -> dict:
         wall.thermal.temperature.value = temperature
         return {"thermal_condition": "Temperature", "wall_temperature_k": temperature}
     if thermal_cfg != {"mode": "adiabatic"}:
-        raise SolverPipelineError("Use fixed_temperature for the cold endpoint or adiabatic for its reference")
+        raise SolverPipelineError("Unsupported wall thermal configuration")
     wall.thermal.thermal_condition = "Heat Flux"
     wall.thermal.heat_flux.option = "value"
     wall.thermal.heat_flux.value = 0.0
@@ -80,8 +98,14 @@ def _temperature_summary(solver, wall_names: list[str]) -> dict:
         }
 
     compute = solver.settings.solution.report_definitions.compute
-    return {key: report_scalar(compute(report_defs=[name]), name)
-            for key, (name, _) in specs.items()}
+    values = {key: report_scalar(compute(report_defs=[name]), name)
+              for key, (name, _) in specs.items()}
+    if any(not math.isfinite(value) or value <= 0 for value in values.values()):
+        raise SolverPipelineError("Final wall temperature reports must be finite positive kelvin")
+    if not (values["wall_temperature_min_k"] <= values["wall_temperature_avg_k"]
+            <= values["wall_temperature_max_k"]):
+        raise SolverPipelineError("Final wall temperature reports have inconsistent minimum/mean/maximum")
+    return values
 
 
 def _iterate_with_temperature_history(solver, cfg, wall_names):
@@ -280,6 +304,18 @@ def solve_case(cfg: dict, mesh_file: str | Path, *, reference_cfg: dict | None =
             if summary.get("temperature_history", {}).get("status") in ("complete", "partial"):
                 summary["temperature_history"]["source_sha256"] = {
                     key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
+
+        if (ran_iterations and cfg["thermal"]["mode"] == "radiative_equilibrium"
+                and cfg.get("outputs", {}).get("compute_temperature_summary", True)):
+            try:
+                summary.update(_temperature_summary(solver, wall_zones))
+                summary["wall_temperature_report"] = {"status": "complete",
+                    "meaning": "Steady radiative-equilibrium wall temperature; not adiabatic recovery temperature"}
+            except (ValueError, RuntimeError, AttributeError, KeyError) as exc:
+                # The saved pair is recoverable. The subsequent export stage
+                # must still provide validated wall temperatures before solid analysis.
+                summary["wall_temperature_report"] = {"status": "unavailable", "error": str(exc)}
+                print(f"[solve] Optional final wall-temperature report unavailable: {exc}", flush=True)
 
         paths["summary"].write_text(json.dumps(summary, indent=2), encoding="utf-8")
         return summary

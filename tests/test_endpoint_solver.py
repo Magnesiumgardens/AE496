@@ -56,7 +56,7 @@ class EndpointSolverTests(unittest.TestCase):
     def test_warm_reference_reads_case_data_switches_wall_and_never_initializes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cfg = yaml.safe_load((ROOT/'config.yaml').read_text())
+            cfg = yaml.safe_load((ROOT/'tests/fixtures/two_endpoint_config.yaml').read_text())
             cfg['project']['work_dir']=str(root)
             cfg['geometry']['input_file']=str(root/'nose.x_t')
             cfg['solver']['temperature_history']['enabled']=False

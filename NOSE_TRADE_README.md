@@ -1,25 +1,28 @@
 # Migration from the previous project
 
-Use the update and run commands in [README.md](README.md). Shared `pipeline/`
-modules hold the implementation; `study.py` runs, resumes and reports the study.
-The familiar solver, exporter, thermal and batch scripts remain compatibility
-entry points.
+Use the update/run commands in [README.md](README.md). Shared `pipeline/`
+modules implement the study; `study.py` runs, resumes and regenerates reports.
+Familiar solver, exporter, thermal and batch scripts remain compatibility entry points.
 
-Keep original CAD inputs in `geometry_batch/` and case folders in `runs/<case>/`.
-The case-specific `_batch/config.yaml` is the authoritative work-directory and
-geometry mapping. Updates preserve meshes and simulation files and retain
-superseded results under `_history/`. A prior direct-adiabatic solution is not
-silently adopted as a cold-wall calibration.
+The active strategy is **one radiating-wall steady CFD solve → solved equilibrium
+surface-temperature export and aerodynamic forces → separate Mechanical APDL
+conduction with prescribed surface temperature**. It requires no cold/adiabatic
+pairing and derives no convection coefficient.
 
-The restored default is **cold-wall steady CFD → warm-started adiabatic CFD →
-spatial convection coefficient and recovery temperature → separate transient
-Mechanical APDL analysis**. Aerodynamic exports and comparison reports are
-retained. Cold-wall heat flux calibrates `h`; it is not applied as a constant
-flux through the solid exposure. See the evidence and limits in
+Mechanical imposes the steady spatial CFD wall temperature as a surface step.
+The interior warms over configurable physical time; the surface warm-up is not
+predicted. No extra radiation, convection or heat-flux load belongs on that
+temperature-constrained boundary. The historical Mechanical heat-flux runner
+did not implement this new coupling. Evidence and limits are recorded in
 [docs/ORIGINAL_WORKFLOW_COMPARISON.md](docs/ORIGINAL_WORKFLOW_COMPARISON.md).
 
-Review flight direction, explicit heat-flux sign, reference width, tungsten
-properties, radiation and exposure duration on a known case before a batch.
-The current coefficient is spatially varying but fixed as the solid warms;
-wall-temperature dependence and a changing flight envelope require additional
-calibration rather than a guessed correction.
+Keep CAD in `geometry_batch/` and case folders in `runs/<case>/`. Each case's
+`_batch/config.yaml` remains authoritative. Updates preserve meshes, old
+simulation files, flow direction and explicit numerical controls. A previous
+cold-wall or adiabatic solution cannot satisfy the new radiating-wall model.
+Current figures check source hashes and use equilibrium/prescribed-temperature
+labels; historical reference data must be explicitly selected.
+
+Review nose orientation, radiation environment, reference width, tungsten
+properties and exposure before batching. Default airflow remains toward −X,
+SpaceClaim remains selected, and the current default exposure is 200 seconds.

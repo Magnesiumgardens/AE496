@@ -1,35 +1,77 @@
-# Original evidence and restored endpoint workflow
+# Original evidence and the selected single-solve model
 
-The supplied Python files and YAML establish the intended workflow, but they disagree in places: the uploaded thermal runner applies fixed heat flux, while the newer thermal YAML declares endpoint-derived convection. The separate adiabatic-reference runner and complete matching endpoint logs were not provided. The restored implementation follows the newer convection configuration and the user's current instruction to recover that strategy.
+The latest user-approved model replaces the active two-endpoint strategy with
+one radiative-equilibrium CFD solve and explicitly prescribed surface-temperature
+loading in Mechanical. That approval supersedes the earlier instruction to
+derive `h` from cold-wall and adiabatic endpoints.
 
-| Choice | Uploaded original | Restored default |
+The uploaded original `pipeline/solve.py` contains a radiative-equilibrium
+branch. It selects Fluent's wall `Radiation` thermal condition and supplies
+external emissivity and surroundings temperature. The original configuration
+describes this as solving wall temperature from gas-side heating and external
+radiation. The current adapter uses the live allowed enum and explicit
+option/value fields with readback checks for Ansys 2025 R1.
+
+The approximate surface balance is
+`q_gas = emissivity × sigma × (Tw⁴ − T_environment⁴)`, with no wall storage or
+lateral solid conduction in this CFD wall model. The result `Tw(s)` is an
+equilibrium surface temperature. It is not adiabatic recovery temperature or a
+gas temperature sampled at a specified offset distance. Separate exported
+fluid-side static samples retain their own field/sampling descriptions.
+
+| Choice | Evidence from uploaded originals | Selected implementation |
 |---|---|---|
-| First CFD endpoint | Prescribed 300 K wall; exports cold-wall heat flux | Same cold-wall reference, with explicit condition and numerical checks |
-| Adiabatic reference | Configuration declares 600 iterations starting from the cold-wall field without initialization | Read the screened cold-wall case/data, set zero wall heat flux and continue without initialization |
-| Mechanical loading | Newer thermal YAML declares `h(s) = q_cold(s)/(T_aw(s) − 300 K)` | Derive a spatial convection package from matched wall samples; load `h(s)` and recovery temperature |
-| Flight direction | Earlier template uses +X | Confirmed −X into the current +X nose |
-| CFD startup | Hybrid initialization; no explicit Courant/discretization override | Hybrid for cold wall, recorded native defaults unless overridden; no initialization for the warm adiabatic solve |
-| Gas model | Laminar, ideal-gas density, Sutherland viscosity | Same configured baseline |
-| Mesh | Nominal sizes and inflation; some batch paths could retry without inflation | Preserve an unchanged mesh; fail and diagnose rather than silently removing layers |
-| Solid material | Constant tungsten `k=170`, `rho=19250`, `Cp=130` | Same configurable approximation |
-| Exposure | 400 seconds; radiation enabled | Configurable 200-second default; radiation enabled |
-| Aerodynamics | Original files do not include the current force comparison | Keep sectional drag/lift and optional common-reference coefficients from the adiabatic endpoint |
-| Acceptance | Save/export after an iteration call; relied on native Fluent stopping | Align native and external targets, check limiting and provenance, block invalid Mechanical inputs |
+| CFD thermal condition | Fixed-temperature and radiative-equilibrium branches are implemented | One `Radiation` wall solve; no prescribed 300 K temperature or zero-flux wall |
+| Equilibrium inputs | Emissivity 0.90, radiation environment 3 K | Configurable same baseline; 300 K is reference metadata only |
+| Mechanical coupling | Supplied runner actually applies fixed `HFLUX` plus `RAD`; no recovered temperature coupling | New, explicit nodal prescribed-temperature boundary, without extra heat-transfer loads |
+| Cold/adiabatic calibration | Other uploaded YAML declared an endpoint-derived convection model | Retained compatibility implementation; bypassed by the active single-solve model |
+| Direction and launch | Earlier template uses +X and automatic Geometry launch | User-confirmed −X into the +X nose; working SpaceClaim selection retained |
+| CFD startup | Hybrid, steady density-based implicit, no explicit Courant/scheme override | Recorded native defaults unless user controls are explicit; migration preserves controls |
+| Mesh and gas | Mach 8, p∞ 1090 Pa, T∞ 226.5 K; planar surface, laminar ideal/Sutherland baseline | Same configured baseline; retain repaired Ansys 2025 R1 meshing and unchanged mesh |
+| Solid material | Constant tungsten `k=170`, `rho=19250`, `Cp=130` | Same configurable approximations, requiring high-temperature verification |
+| Exposure | Historical runs use 400 seconds | Configurable 200-second current default; preserve user duration |
+| Outputs | Temperature summaries, solid fields, histories and animation | Retain equivalent temperature visuals and sectional drag/lift, with explicit model labels |
 
-The earlier uploaded `thermal_analysis_old.yaml` describes fixed-heat-flux solid loading. The newer `thermal_analysis.yaml` describes endpoint-derived convection. The restored workflow follows the latter: cold-wall flux calibrates `h`, while Mechanical computes the changing convection load as the solid warms.
+## Meaning of prescribed Mechanical loading
 
-## What differs from the intervening rebuild
+Mechanical reconstructs the solid boundary from actual CFD wall vertices and
+linearly maps their equilibrium temperatures to FE boundary nodes. The surface
+temperature steps from its initial value to the specified spatial field; the
+interior then changes by conduction. Wall history after application records
+the imposed temperature, not a prediction of surface warm-up. Whole-solid
+statistics include constrained boundary nodes as well as interior nodes.
 
-The intervening direct-adiabatic rebuild removed the cold-wall endpoint and required a user-specified uniform coefficient. It also changed initialization, imposed Courant/first-order controls and tightened the energy residual target to `1e-6`. Those changes were not an equivalent implementation of the declared original strategy.
+The selected approximation does not derive `h`, calculate transient gas heating,
+or provide exported constraint-reaction heat load. Convection or another
+heat-transfer law would be needed to predict the surface's own warming; coupled
+CFD/solid analysis would also allow feedback. Additional convection, radiation
+or heat-flux loads on the prescribed boundary would change the selected model
+and are excluded. CFD wall radiation remains active in the upstream equilibrium
+temperature calculation.
 
-The restored default starts from the cold-wall solution, derives spatial `h`, and uses explicit `1e-3` baseline residual targets including energy. This intentionally restores the observed stopping scale; it does not establish better temperature accuracy. Actual recovery temperatures, forces and conservation must still settle, and numerical sensitivity remains part of CDR validation.
+## Evidence and validation scope
 
-The independent direct-adiabatic/specified-h path is retained for compatibility and for cases with a justified externally supplied coefficient. Neither path invents temperature dependence of `h`. Endpoint-derived coefficients apply to the cold-wall reference and configured gas model; extending them to a hot solid or changing flight envelope requires a correlation or additional calibrated conditions.
+The fetched tracked `main` documentation had only a brief README. This audit
+covers source history, uploaded Python/YAML, handoffs and supplied console logs;
+it does not establish untracked GitHub discussions. The supplied successful
+1161-iteration regression is a **300 K fixed-temperature run**, not a validated
+radiative-equilibrium run. The original radiation branch documents and
+implements the capability; its live execution still needs verification.
 
-## Documentation scope and runtime evidence
+Historical 5000 K clipping, an iteration budget completing, or a saved plot
+does not establish a trustworthy thermal field. Current export and Mechanical
+loading check the intended wall model, residual screen and source hashes.
+Older endpoint results remain retained but cannot substitute for the selected
+single radiating-wall solution.
 
-The fetched, tracked `main` documentation contained only a brief README. This audit covers Git source history and the uploaded files and handoffs; it does not establish the contents of GitHub issue comments or other untracked discussions. A historical plot or a case that reaches an iteration limit is not, by itself, proof of a converged adiabatic reference. Earlier logs showing repeated 5000 K temperature limiting cannot establish a trustworthy thermal boundary condition.
+Fluent's `energy` column is an equation residual, not temperature in kelvin.
+Optional CFD temperature histories use iteration labels and diagnose a steady
+calculation. Mechanical alone supplies physical-time solid histories in this
+workflow. Its prescribed surface curves and computed interior conduction are
+labelled separately.
 
-Fluent's displayed `energy` column is an equation residual, not a temperature in kelvin or a temperature error estimate. Optional iteration-temperature histories monitor the steady CFD calculation. Mechanical alone supplies the physical-time tungsten heating histories.
-
-Windows failures involving settings adapters and optional raw-history `.out` locks were implementation problems in the rebuild. The restored workflow keeps candidate case/data recoverable and prevents a raw-log lock from undoing a valid solution. These file-handling fixes are retained independently of the physical-model restoration.
+Adapter, history-file locking, candidate recovery, configuration migration,
+mesh reuse and aerodynamic-report fixes are retained independently of this
+model change. Offline tests validate code contracts and plots; they do not
+validate licensed Ansys numerical results, mesh independence or material
+survivability for CDR.

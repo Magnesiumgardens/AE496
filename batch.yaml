@@ -1,4 +1,4 @@
-# Sequential cold-wall -> adiabatic reference -> Mechanical nose study.
+# One radiative-equilibrium CFD solve -> prescribed-temperature Mechanical study.
 geometry_directory: ./geometry_batch
 geometry_glob: "*.x_t"
 base_config: ./config.yaml
@@ -16,22 +16,13 @@ timeouts:
   mesh:
     hard_s: 7200
     inactivity_s: 600
-  cold_wall:
+  solver:
     hard_s: 7200
     inactivity_s: 1200
-  adiabatic:
-    hard_s: 3600
-    inactivity_s: 1200
-  adiabatic_export:
+  temperature_export:
     hard_s: 1200
     inactivity_s: 600
   aero:
-    hard_s: 1200
-    inactivity_s: 600
-  cold_export:
-    hard_s: 1200
-    inactivity_s: 600
-  thermal_bc:
     hard_s: 1200
     inactivity_s: 600
   thermal:

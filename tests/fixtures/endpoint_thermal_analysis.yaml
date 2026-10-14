@@ -1,0 +1,34 @@
+# Separate Mechanical APDL solid solve using matched CFD calibration endpoints.
+# h(s)=q_cold(s)/(T_aw(s)-T_cold); Mechanical evaluates h(s)*(T_aw(s)-T_wall).
+mapdl_version: 251
+processors: 4
+mesh_size_m: null
+initial_temperature_k: 300.0
+include_radiation: true
+emissivity: 0.9
+radiation_temperature_k: 226.5
+loading:
+  mode: convective_from_cfd
+  # Reject ill-conditioned endpoint ratios instead of guessing or clipping h.
+  min_delta_temperature_k: 25.0
+material:
+  name: Tungsten
+  # Constant-property approximation: verify values for the relevant temperature range.
+  conductivity_w_mk: 170.0
+  density_kg_m3: 19250.0
+  specific_heat_j_kgk: 130.0
+transient:
+  duration_s: 200.0
+  initial_time_step_s: 2.0
+  min_time_step_s: 0.2
+  max_time_step_s: 10.0
+visualization:
+  enabled: true
+  save_final_temperature_image: true
+  save_heat_flux_image: false
+  save_temperature_history_image: true
+  make_gif: false
+  max_animation_frames: 60
+  dpi: 160
+design_limits:
+  max_temperature_k: null

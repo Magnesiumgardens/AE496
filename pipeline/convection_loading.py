@@ -25,6 +25,9 @@ class ConvectionLoad:
 
 
 def validate_settings(cfd_cfg, cfg):
+    if cfd_cfg.get("thermal", {}).get("mode") == "radiative_equilibrium":
+        from .prescribed_loading import validate_settings as prescribed_settings
+        return prescribed_settings(cfd_cfg, cfg)
     endpoint = cfd_cfg.get("workflow", {}).get("strategy") == "two_endpoint"
     if not endpoint and cfd_cfg.get("thermal") != {"mode":"adiabatic"}:
         raise ThermalAnalysisError("Mechanical convection requires adiabatic CFD temperatures.")

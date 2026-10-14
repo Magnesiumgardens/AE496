@@ -112,16 +112,16 @@ def validate_stage_outputs(stage, paths):
             rows = read_csv(paths[0])
             summary = read_json(paths[1])
             if (not rows or len(rows) != summary["face_count"] or summary.get("status") != "complete"
-                    or summary.get("thermal_mode") != "adiabatic"):
-                raise ValueError("Invalid adiabatic export summary")
+                    or summary.get("thermal_mode") not in ("adiabatic","radiative_equilibrium")):
+                raise ValueError("Invalid solved-temperature export summary")
             for row in rows:
                 for key in ("wall_temperature_K", "near_wall_fluid_temperature_K", "segment_length_m"):
                     value = float(row[key])
                     if not math.isfinite(value) or value <= 0:raise ValueError(f"Invalid {key}")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise BatchError(f"Invalid temperature_export output: {exc}") from exc
-    elif stage == "thermal" and (read_json(paths[0]).get("loading_mode") != "convection" or read_json(paths[0]).get("status") != "complete"):
-        raise BatchError("Mechanical summary must report temperature-driven convection")
+    elif stage == "thermal" and (read_json(paths[0]).get("loading_mode") not in ("convection","prescribed_temperature") or read_json(paths[0]).get("status") != "complete"):
+        raise BatchError("Mechanical summary must report the selected temperature-driven loading")
     elif stage == "aero" and read_json(paths[0]).get("status") != "complete":
         raise BatchError("aero summary does not report a complete result")
 
@@ -245,6 +245,7 @@ def _archive_stage(stage, work, cfg, state):
         # Retain the superseded isothermal/solid workflow along with its CFD.
         candidates.extend([work / "thermal_bc", work / "thermal_analysis",
                            work / "batch_logs/thermal_export.log", work / "batch_logs/thermal.log"])
+        if cfg.get("workflow",{}).get("strategy") == "single_solve":candidates.append(work/"cfd")
         state["stages"].pop("thermal_export", None)
         state["stages"].pop("thermal", None)
     if "thermal" in INVALIDATES[stage]:candidates.append(work / "thermal_analysis")
@@ -267,6 +268,10 @@ def _archive_stage(stage, work, cfg, state):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(target))
     print(f"[resume] Retained previous outputs: {archive}")
+    if cfg.get("workflow",{}).get("strategy") == "single_solve":
+        from .gas_reporting import COMPARISON_ARTIFACTS
+        for name in COMPARISON_ARTIFACTS:(work.parent/"comparison"/name).unlink(missing_ok=True)
+        if (work.parent/"comparison/solid").is_dir():shutil.rmtree(work.parent/"comparison/solid")
 
 
 def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=True, stop_after=None,
@@ -278,7 +283,8 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
         from .endpoint_workflow import run_case as run_endpoints
         return run_endpoints(config_path,thermal_config_path,resume,stop_after,runner=_runner,
                              enabled=_enabled_stages,timeouts=_timeouts,allow_adopt=_allow_adopt)
-    stop_after = stop_after or "aero"
+    single = cfg.get("workflow",{}).get("strategy") == "single_solve"
+    stop_after = stop_after or ("thermal" if single else "aero")
     work = Path(cfg["project"]["work_dir"]).resolve()
     work.mkdir(parents=True, exist_ok=True)
     if stop_after not in STAGES:
@@ -293,6 +299,7 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
     files = stage_files(work, cfg)
     state_path = work / "_batch/stage_state.json"
     state = read_json(state_path) or {"version": 2, "stages": {}}
+    if single:state.update(version=4,strategy="single_solve")
     state.setdefault("stages", {})
     arguments = ["--config", str(config_path)]
     commands = {
@@ -308,13 +315,20 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
         record = state["stages"].get(stage)
         try:
             validate_stage_outputs(stage, files[stage])
+            if single and stage == "temperature_export":
+                from .gas_reporting import temperature_complete
+                if not temperature_complete(cfg):raise BatchError("Temperature export does not match the selected radiative case")
+            if single and stage == "thermal":
+                from .mechanical_reporting import mechanical_complete
+                if not mechanical_complete(work,cfg):raise BatchError("Mechanical results are stale or use a different load model")
             valid_outputs = True
         except BatchError:
             valid_outputs = False
         if resume and valid_outputs and reusable(record, fingerprint, files[stage]):
             if stage == "solver":
                 from .solution_quality import saved_quality
-                if saved_quality(cfg)["status"] == "failed":valid_outputs = False
+                quality = saved_quality(cfg)
+                if quality["status"] == "failed" or (single and quality["status"] != "residual_screen_passed"):valid_outputs = False
         if resume and valid_outputs and reusable(record, fingerprint, files[stage]):
             print(f"[resume] {cfg['project']['name']}: {stage} unchanged")
             outcomes[stage] = "reused"
@@ -365,8 +379,14 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                 summary["convergence_status"] = quality["status"]
                 atomic_json(work/"summary.json",summary)
                 save_diagnostics(work / "batch_logs/solver.log",cfg)
-                if quality["status"] == "failed":
-                    raise BatchError("CFD did not converge; saved diagnostic case/data retained. " + "; ".join(quality["reasons"]))
+                if quality["status"] == "failed" or (single and quality["status"] != "residual_screen_passed"):
+                    raise BatchError("CFD did not converge; saved diagnostic case/data retained. " + "; ".join(quality.get("reasons",[quality.get("reason","Residuals not verified")])) )
+            if single and stage == "temperature_export":
+                from .gas_reporting import temperature_complete
+                if not temperature_complete(cfg):raise BatchError("Exported temperatures are stale or incompatible with radiative equilibrium")
+            if single and stage == "thermal":
+                from .mechanical_reporting import mechanical_complete
+                if not mechanical_complete(work,cfg):raise BatchError("Prescribed-temperature Mechanical results lack current provenance")
         except Exception as exc:
             state["stages"][stage] = dict(status="failed", fingerprint=fingerprint, error=str(exc))
             _save_state(state_path, state)

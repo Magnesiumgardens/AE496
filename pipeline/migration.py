@@ -128,21 +128,127 @@ def endpoint_batch_config(cfg):
     return result
 
 
+def single_solve_config(cfg):
+    """Select one radiating CFD wall, preserving successful numerical choices.
+
+    The 300 K value is reference metadata, never a prescribed CFD temperature.
+    Endpoint settings are obsolete for this strategy; their saved outputs are
+    deliberately left on disk for review and are not new thermal inputs.
+    """
+    cfg = copy.deepcopy(cfg)
+    workflow = cfg.setdefault("workflow", {})
+    # Endpoint-specific controls are actual inputs to the previous primary
+    # solve. Preserve them when collapsing that primary into one CFD case.
+    primary_overrides = copy.deepcopy(workflow.get("cold_wall_solver", {})) if workflow.get("strategy") == "two_endpoint" else {}
+    workflow["strategy"] = "single_solve"
+    for key in ("adiabatic_reference_iterations", "min_delta_temperature_k",
+                "coordinate_tolerance_m", "cold_wall_solver", "adiabatic_solver"):
+        workflow.pop(key, None)
+    cfg.pop("adiabatic_reference", None)
+    for key in ("_endpoint_kind", "_study_work_dir", "_cold_wall_thermal", "_study_solver"):
+        cfg.pop(key, None)
+    previous_thermal = cfg.get("thermal", {}) or {}
+    thermal = copy.deepcopy(previous_thermal) if previous_thermal.get("mode") == "radiative_equilibrium" else {}
+    thermal["mode"] = "radiative_equilibrium"
+    for key, default in dict(wall_temperature_k=300.0, emissivity=.9,
+                             external_radiation_temperature_k=3.0).items():
+        thermal.setdefault(key, previous_thermal.get(key, default))
+    cfg["thermal"] = thermal
+    solver = cfg.setdefault("solver", {})
+    solver.update(primary_overrides)
+    # Explicit startup controls—including null for native settings—remain inputs.
+    # Do not repeat the prior migration's aggressive reset of a working solver.
+    solver.setdefault("initialization", "hybrid" if solver.get("hybrid_initialize", True) else "freestream")
+    solver.pop("hybrid_initialize", None)
+    solver.setdefault("courant_number", None)
+    solver.setdefault("flow_scheme", None)
+    solver.setdefault("residual_thresholds", {name: 1e-3 for name in
+                                            ("continuity", "x-velocity", "y-velocity", "energy")})
+    solver.setdefault("temperature_history", dict(enabled=True, sample_every_iterations=25))
+    cfg.pop("thermal_export", None)
+    export = cfg.setdefault("temperature_export", {})
+    export["enabled"] = True
+    for key, value in dict(output_directory="temperature", static_temperature_field="temperature",
+                           export_fluid_nodes=True).items():
+        export.setdefault(key, value)
+    # These belong to zero-flux validation, not a radiating equilibrium wall.
+    export.pop("heat_flux_field", None)
+    export.pop("zero_flux_tolerance_W_m2", None)
+    outputs = cfg.setdefault("outputs", {})
+    outputs["write_case_data"] = True
+    outputs.pop("export_custom_heat_flux", None)
+    outputs.pop("compute_temperature_summary", None)
+    return cfg
+
+
+def single_solve_state(state):
+    """Keep mesh provenance and invalidate results from a different wall model."""
+    state = copy.deepcopy(state)
+    state.update(version=4,strategy="single_solve")
+    stages = state.setdefault("stages", {})
+    names = (set(stages) - {"mesh"}) | {"solver", "temperature_export", "aero", "thermal"}
+    for stage in names:
+        stages[stage] = dict(status="stale", reason="Changed CFD driver to one radiative-equilibrium wall solution")
+    return state
+
+
+def _with_defaults(existing, defaults):
+    result = copy.deepcopy(existing)
+    for key, default in defaults.items():
+        if key not in result:
+            result[key] = copy.deepcopy(default)
+        elif isinstance(result[key], dict) and isinstance(default, dict):
+            result[key] = _with_defaults(result[key], default)
+    return result
+
+
+def single_solve_thermal_config(cfg, defaults=None):
+    """Prescribe imported equilibrium wall temperatures in the solid model.
+
+    Radiation already sets the CFD equilibrium temperature. Adding RAD or CONV
+    to the same prescribed-temperature solid boundary would not predict its
+    warm-up, so both are excluded from this explicit loading formulation.
+    """
+    previous = copy.deepcopy(cfg or {})
+    result = _with_defaults(previous, defaults or {})
+    if (previous.get("loading", {}) or {}).get("mode") != "prescribed_temperature":
+        result["loading"] = {"mode": "prescribed_temperature"}
+    else:
+        result.setdefault("loading", {})["mode"] = "prescribed_temperature"
+    result["include_radiation"] = False
+    return result
+
+
+def single_solve_batch_config(cfg):
+    result = copy.deepcopy(cfg)
+    result.setdefault("thermal_config", "./thermal_analysis.yaml")
+    result.setdefault("run_thermal", True)
+    result.pop("run_adiabatic_reference", None)
+    result.pop("adiabatic_required", None)
+    limits = result.setdefault("timeouts", {})
+    for stage, previous in (("solver", "cold_wall"), ("temperature_export", "adiabatic_export")):
+        if previous in limits:
+            limits.setdefault(stage, copy.deepcopy(limits[previous]))
+    for stage in ("cold_wall", "cold_export", "adiabatic", "adiabatic_reference", "adiabatic_export", "thermal_bc"):
+        limits.pop(stage, None)
+    return result
+
+
 def migrate_config(path):
     path = Path(path).resolve()
     old_bytes = path.read_bytes()
     old = yaml.safe_load(old_bytes) or {}
-    new = endpoint_config(old)
+    new = single_solve_config(old)
     if old == new:return False
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    backup = path.parent / f"{path.stem}_before_two_endpoint_{stamp}{path.suffix}"
+    backup = path.parent / f"{path.stem}_before_single_solve_{stamp}{path.suffix}"
     shutil.copy2(path, backup)
     state_path = path.parent / "stage_state.json"
     if path.parent.name == "_batch" and state_path.is_file():
-        shutil.copy2(state_path, path.parent / f"stage_state_before_two_endpoint_{stamp}.json")
+        shutil.copy2(state_path, path.parent / f"stage_state_before_single_solve_{stamp}.json")
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state = endpoint_state(state)
+        state = single_solve_state(state)
         state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     path.write_text(yaml.safe_dump(new, sort_keys=False), encoding="utf-8")
-    print(f"[migrate] Two-endpoint config: {path}; previous config: {backup}")
+    print(f"[migrate] Single radiative-equilibrium config: {path}; previous config: {backup}")
     return True

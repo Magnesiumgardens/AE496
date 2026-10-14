@@ -189,7 +189,7 @@ class SpatialMechanicalTests(unittest.TestCase):
     def test_endpoint_thermal_runner_saves_spatial_package_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); work = root / 'nose'; cfg = endpoint_case(work)
-            thermal = yaml.safe_load((ROOT / 'thermal_analysis.yaml').read_text())
+            thermal = yaml.safe_load((ROOT / 'tests/fixtures/endpoint_thermal_analysis.yaml').read_text())
             thermal['loading']['mode'] = 'convective_from_cfd'
             thermal['transient'].update(duration_s=2, initial_time_step_s=1, min_time_step_s=.1, max_time_step_s=2)
             thermal['visualization']['enabled'] = False

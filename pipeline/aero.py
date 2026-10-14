@@ -124,16 +124,53 @@ def setting_scalar(value):
     return number
 
 
+def wall_thermal_state(thermal, requested):
+    """Validate the actual boundary, including external-only wall radiation.
+
+    Fluent's volumetric radiation model stays disabled: the wall Radiation
+    condition independently balances gas-side heating against external emission.
+    """
+    mode = requested.get("mode")
+    expected = {"adiabatic": "heatflux", "fixed_temperature": "temperature",
+                "radiative_equilibrium": "radiation"}.get(mode)
+    if expected is None:
+        raise ValueError(f"Unsupported saved wall thermal mode: {mode!r}")
+    condition = thermal.thermal_condition.get_state()
+    if str(condition).casefold().replace(" ", "") != expected:
+        raise ValueError(f"Saved wall condition differs from {mode}; rerun CFD")
+
+    def check(name, setting, value):
+        actual = setting_scalar(setting.get_state())
+        wanted = setting_scalar(value)
+        if not math.isclose(actual, wanted, rel_tol=1e-6, abs_tol=1e-8):
+            raise ValueError(f"Saved case {name}={actual} differs from requested {wanted}; rerun CFD")
+        return actual
+
+    state = {"thermal_condition": str(condition)}
+    if mode == "adiabatic":
+        state["heat_flux_W_m2"] = check("wall heat flux", thermal.heat_flux, 0.0)
+    elif mode == "fixed_temperature":
+        state["wall_temperature_k"] = check("cold wall temperature", thermal.temperature,
+                                             requested["wall_temperature_k"])
+    else:
+        state["emissivity"] = check("external emissivity", thermal.external_emissivity,
+                                     requested["emissivity"])
+        state["external_radiation_temperature_k"] = check(
+            "external radiation temperature", thermal.ext_rad_temperature,
+            requested["external_radiation_temperature_k"])
+    return state
+
+
 def validate_saved_conditions(solver, cfg):
     """Check saved physical conditions before relabeling an existing CFD result."""
     setup = solver.settings.setup
     mode = cfg["thermal"].get("mode")
-    if mode not in ("adiabatic", "fixed_temperature"):
-        raise ValueError("Saved-result export requires a supported endpoint configuration")
+    if mode not in ("adiabatic", "fixed_temperature", "radiative_equilibrium"):
+        raise ValueError("Saved-result export requires a supported wall thermal configuration")
     if not setup.models.energy.enabled.get_state():
         raise ValueError("Saved case has no fluid energy equation; rerun CFD")
     if str(setup.models.radiation.model.get_state()).casefold() != "none":
-        raise ValueError("Saved case has radiation enabled; rerun CFD with no heat transfer")
+        raise ValueError("Saved case has volumetric radiation enabled; rerun CFD with radiation.model=none")
     state = reference_state(cfg)
     base = cfg["geometry"].get("farfield_name", "farfield")
     farfields = setup.boundary_conditions.pressure_far_field
@@ -182,15 +219,7 @@ def validate_saved_conditions(solver, cfg):
     if not zones:
         raise ValueError("Saved case has no matching body-wall boundaries")
     for name in zones:
-        thermal = walls[name].thermal
-        condition = thermal.thermal_condition.get_state()
-        expected_condition = "heatflux" if mode == "adiabatic" else "temperature"
-        if str(condition).casefold().replace(" ", "") != expected_condition:
-            raise ValueError(f"Saved wall condition differs from the {mode} endpoint; rerun CFD")
-        if mode == "adiabatic":
-            check("wall heat flux", thermal.heat_flux.get_state(), 0.0)
-        else:
-            check("cold wall temperature", thermal.temperature.get_state(), cfg["thermal"]["wall_temperature_k"])
+        wall_thermal_state(walls[name].thermal, cfg["thermal"])
 
 
 def aerodynamic_summary(solver, cfg, wall_zones):

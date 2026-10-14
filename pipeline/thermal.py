@@ -18,6 +18,7 @@ from .trade_study import thermal_screening_metrics
 
 MODEL_VERSION = "3.0-temperature-convection"
 ENDPOINT_MODEL_VERSION = "4.0-endpoint-convection"
+PRESCRIBED_MODEL_VERSION = "5.0-prescribed-temperature"
 STEFAN_BOLTZMANN = 5.670374419e-8
 
 
@@ -72,6 +73,22 @@ def map_wall_nodes(xy, node_xy, mesh_size):
 
 
 def wall_rows(time, load, wall_temperature, nnum, indices, distances, settings):
+    if load.mode == "prescribed_temperature":
+        # Prescribed temperature determines neither convection h nor the heat
+        # needed to enforce the constraint. A reaction extraction would be
+        # required for a heat-load report; do not invent zero flux here.
+        return [
+            {
+                "time_s": float(time), "surface_order_index": index,
+                "x_m": float(point[0]), "y_m": float(point[1]),
+                "prescribed_surface_temperature_K": float(load.surface_temperature[index]),
+                "boundary_load_state": "initial_before_application" if time == 0 else "prescribed_surface",
+                "nearest_thermal_node_id": int(nnum[indices[index]]),
+                "nearest_thermal_node_distance_m": float(distances[index]),
+                "wall_temperature_K": float(wall_temperature[index]),
+            }
+            for index, point in enumerate(load.xy)
+        ]
     incoming = load.incoming_flux(wall_temperature)
     radiation = (
         settings["emissivity"] * STEFAN_BOLTZMANN * (wall_temperature**4 - settings["trad"]**4)
@@ -125,16 +142,22 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
     wall_history = wall_rows(0, load, initial[indices], nnum, indices, distances, settings)
     snapshots = [{"result_set": 0, "time_s": 0.0, "temperature_K": initial}]
     selected = select_snapshots(len(times), max_frames)
-    surface_power = [[0.0, integrate_boundary(load.xy, np.asarray([row["net_surface_heat_flux_into_wall_W_m2"] for row in wall_history]))]]
+    prescribed = load.mode == "prescribed_temperature"
+    surface_power = [] if prescribed else [[0.0, integrate_boundary(load.xy, np.asarray([
+        row["net_surface_heat_flux_into_wall_W_m2"] for row in wall_history]))]]
     final = None
     for number, (time, values) in enumerate(zip(times, temperatures), 1):
         values = np.asarray(values, dtype=float)
         if values.shape != (len(nnum),):
             raise ThermalAnalysisError(f"Result set {number} contains the wrong number of nodal temperatures.")
         history.append({"time_s": float(time), **temperature_stats(values)})
+        if prescribed and not np.allclose(values[indices], load.surface_temperature, rtol=1e-5, atol=1e-4):
+            raise ThermalAnalysisError("MAPDL wall temperatures do not match the prescribed CFD surface field")
         rows = wall_rows(time, load, values[indices], nnum, indices, distances, settings)
         wall_history.extend(rows)
-        surface_power.append([float(time), integrate_boundary(load.xy, np.asarray([row["net_surface_heat_flux_into_wall_W_m2"] for row in rows]))])
+        if not prescribed:
+            surface_power.append([float(time), integrate_boundary(load.xy, np.asarray([
+                row["net_surface_heat_flux_into_wall_W_m2"] for row in rows]))])
         if number in selected:
             snapshots.append({"result_set": number, "time_s": float(time), "temperature_K": values.copy()})
         final = values
@@ -152,17 +175,24 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
         row["thermal_wall_temperature_K"] = row["wall_temperature_K"]
         final_wall.append(row)
     write_csv(output / "wall_temperature_final.csv", final_wall)
-    boundary_data = ({"boundary_gas_temperature_K":load.gas_temperature, "convection_coefficient_W_m2K":load.coefficient}
+    boundary_data = ({"boundary_prescribed_temperature_K": load.surface_temperature} if prescribed else
+                     {"boundary_gas_temperature_K":load.gas_temperature, "convection_coefficient_W_m2K":load.coefficient}
                      if load.mode == "convection" else {"boundary_flux_W_m2":load.cold_flux})
     np.savez_compressed(output / "thermal_snapshots.npz", node_ids=nnum, coordinates_m=xyz,
         boundary_xy_m=load.xy, time_s=[snap["time_s"] for snap in snapshots],
         temperatures_K=np.asarray([snap["temperature_K"] for snap in snapshots]), **boundary_data)
-    power = np.asarray(surface_power)
-    net_heat_load = float(np.sum(0.5 * (power[1:, 1] + power[:-1, 1]) * np.diff(power[:, 0])))
+    net_heat_load = None
+    if not prescribed:
+        power = np.asarray(surface_power)
+        net_heat_load = float(np.sum(0.5 * (power[1:, 1] + power[:-1, 1]) * np.diff(power[:, 0])))
     return history, snapshots, temperature_stats(final), net_heat_load
 
 
 def apply_surface_loads(mapdl, lines, load, settings):
+    if load.mode == "prescribed_temperature":
+        if settings["include_rad"]:
+            raise ThermalAnalysisError("Prescribed temperature cannot also apply Mechanical radiation on the same boundary")
+        return  # D,TEMP is assigned to all boundary nodes after meshing.
     coefficients = np.broadcast_to(np.asarray(load.coefficient), (len(load.xy),)) if load.mode == "convection" else None
     for index, line in enumerate(lines):
         next_index = (index + 1) % len(lines)
@@ -173,6 +203,40 @@ def apply_surface_loads(mapdl, lines, load, settings):
             mapdl.sfl(line, "HFLUX", float(load.cold_flux[index]), float(load.cold_flux[next_index]))
         if settings["include_rad"]:
             mapdl.sfl(line, "RAD", settings["emissivity"], settings["emissivity"], settings["trad"], settings["trad"])
+
+
+def apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size):
+    """Constrain every meshed line node, not only CFD boundary keypoints."""
+    from .prescribed_loading import interpolate_boundary_temperature
+    mapdl.lsel("NONE")
+    for line in lines:
+        mapdl.lsel("A", "LINE", "", int(line))
+    # NSLL NKEY=1 includes line-interior nodes and endpoint/keypoint nodes.
+    # AMESH associates midside nodes with the solid-model boundary lines too.
+    mapdl.nsll("S", 1)
+    selected = np.asarray(mapdl.mesh.nnum, dtype=int).copy()
+    mapdl.allsel()
+    nnum, xyz = np.asarray(nnum, dtype=int), np.asarray(xyz, dtype=float)
+    if not len(selected) or len(set(selected)) != len(selected):
+        raise ThermalAnalysisError("MAPDL did not identify a unique set of solid-boundary nodes")
+    index_by_node = {int(node): index for index, node in enumerate(nnum)}
+    try:
+        indices = np.asarray([index_by_node[int(node)] for node in selected], dtype=int)
+    except KeyError as exc:
+        raise ThermalAnalysisError("Selected boundary nodes do not match the thermal mesh") from exc
+    tolerance = max(1e-9, float(mesh_size) * 1e-3)
+    values = interpolate_boundary_temperature(load, xyz[indices, :2], tolerance)
+    keypoint_indices, _ = map_wall_nodes(load.xy, xyz[:, :2], mesh_size)
+    if not set(map(int, nnum[keypoint_indices])) <= set(map(int, selected)):
+        raise ThermalAnalysisError("MAPDL boundary selection omitted a CFD wall keypoint")
+    # Batch native D commands when supported to avoid a separate RPC for each
+    # midside or refined line node, while retaining normal behavior for adapters.
+    from contextlib import nullcontext
+    with getattr(mapdl, "non_interactive", nullcontext()):
+        for node, value in zip(selected, values):
+            mapdl.d(int(node), "TEMP", float(value))
+    load.constrained_node_count = len(selected)
+    return selected, values
 
 
 def solve_thermal(mapdl, load, settings, mesh_size):
@@ -203,6 +267,8 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     n_elements = len(mapdl.mesh.enum)
     if len(nnum) < 3 or n_elements < 1:
         raise ThermalAnalysisError("MAPDL generated an empty thermal mesh.")
+    if load.mode == "prescribed_temperature":
+        apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size)
     mapdl.finish()
     mapdl.slashsolu()
     mapdl.antype("TRANS")
@@ -241,11 +307,13 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
     from .utils import atomic_json, file_sha256
     cfg = load_config(cfd_config)
     ta_cfg = load_yaml(thermal_config)
-    settings = validate_settings(cfg, ta_cfg)  # h is checked before any Ansys launch.
+    thermal_config_sha256 = file_sha256(thermal_config)
+    settings = validate_settings(cfg, ta_cfg)  # Validate the loading law before any Ansys launch.
     work = Path(cfg["project"]["work_dir"])
     if run_dir is not None and Path(run_dir).resolve() != work:
         raise ThermalAnalysisError("--run-dir disagrees with the selected CFD config")
     endpoint = cfg.get("workflow", {}).get("strategy") == "two_endpoint"
+    prescribed = settings["loading_mode"] == "prescribed_temperature"
     if endpoint:
         from .endpoint_loading import verify_convection_package, convection_paths
         boundary, metadata = verify_convection_package(cfg)
@@ -262,12 +330,18 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         if not temperature_complete(cfg):
             raise ThermalAnalysisError("Temperature export is missing or stale; rerun study.py export first.")
         metadata = json.loads(temperature_paths(cfg)[1].read_text())
+        temperature_summary_sha256 = file_sha256(temperature_paths(cfg)[1])
         node_metadata = metadata.get("wall_nodes", {})
         boundary = temperature_paths(cfg)[0].parent / "wall_temperature_nodes.csv"
         if not boundary.is_file():raise ThermalAnalysisError("Missing wall-node temperatures; rerun CFD export.")
         if node_metadata.get("csv_sha256") != file_sha256(boundary):
             raise ThermalAnalysisError("CFD boundary-node temperature CSV is missing or modified; rerun export.")
-        load = read_load(boundary, settings["h"])
+        if prescribed:
+            from .prescribed_loading import read_load as read_prescribed_load
+            load = read_prescribed_load(boundary)
+        else:
+            load = read_load(boundary, settings["h"])
+    boundary_sha256 = file_sha256(boundary)
     mesh_size = auto_mesh_size(load.xy, ta_cfg.get("mesh_size_m"))
     output = work / "thermal_analysis"
     output.mkdir(parents=True, exist_ok=True)
@@ -280,24 +354,38 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         history, snapshots, final, net_heat = save_results(output,load,nnum,xyz,temperatures,times,
             settings,mesh_size,ta_cfg.get("visualization",{}).get("max_animation_frames",60))
         viz = dict(ta_cfg.get("visualization",{}), save_heat_flux_image=False)
+        if prescribed:
+            viz["loading_mode"] = "prescribed_temperature"
         from .reporting import create_thermal_visualizations
         figures = create_thermal_visualizations(output,load.xy,np.zeros(len(load.xy)),xyz,history,snapshots,viz)
-        loading_limits = (["Steady matched CFD endpoints define spatial h and recovery temperature; both remain fixed throughout exposure.",
+        loading_limits = (["The steady CFD radiative-equilibrium wall temperature is prescribed on every Mechanical boundary node.",
+                           "The surface temperature steps to the imported field at t=0+ and remains fixed; only the interior temperature response is predicted.",
+                           "No convection coefficient or boundary heat flux is inferred; prescribed-temperature reaction heat is not exported.",
+                           "Radiation is included in the CFD equilibrium surface model and is not applied again on the prescribed Mechanical boundary."] if prescribed else
+                          ["Steady matched CFD endpoints define spatial h and recovery temperature; both remain fixed throughout exposure.",
                            "The derived h is calibrated at the cold-wall temperature; wall-temperature dependence requires further calibration."] if endpoint else
                           ["Constant steady CFD recovery temperature and specified uniform h throughout exposure."])
-        summary = dict(status="complete", model_version=ENDPOINT_MODEL_VERSION if endpoint else MODEL_VERSION,
-            loading_mode="convective_from_cfd" if endpoint else "convection",
+        summary = dict(status="complete", model_version=PRESCRIBED_MODEL_VERSION if prescribed else ENDPOINT_MODEL_VERSION if endpoint else MODEL_VERSION,
+            loading_mode="prescribed_temperature" if prescribed else "convective_from_cfd" if endpoint else "convection",
             backend="Mechanical APDL", material=ta_cfg["material"], analysis={**ta_cfg["transient"], "initial_temperature_k":settings["initial_t"]},
-            thermal_config_path=str(Path(thermal_config).resolve()), thermal_config_sha256=file_sha256(thermal_config),
+            thermal_config_path=str(Path(thermal_config).resolve()), thermal_config_sha256=thermal_config_sha256,
             result_sha256={name:file_sha256(output/name) for name in ("wall_temperature_history.csv", "thermal_nodes_final.csv", "temperature_history.csv")},
-            settings=settings, thermal_configuration=ta_cfg, boundary_csv_sha256=file_sha256(boundary),
+            settings=settings, thermal_configuration=ta_cfg, boundary_csv_sha256=boundary_sha256,
             source_sha256=metadata["source_sha256"], final_temperature=final,
             thermal_mesh=dict(nodes=len(nnum),elements=n_elements,size_m=mesh_size),
             net_heat_load_per_unit_span_J_m=net_heat, visualization_settings=viz, figures=figures,
             limitations=[*loading_limits,
                          "Constant tungsten properties; no ablation, structural response or temperature dependence.",
                          "Reconstructed planar solid, unit out-of-plane thickness; not a full 3-D vehicle.",
-                         "Adiabatic CFD is one-way coupled; heating does not feed back into the gas solution."])
+                         "CFD is one-way coupled; the transient solid response does not feed back into the gas solution."])
+        if prescribed:
+            summary.update(source_temperature_summary_sha256=temperature_summary_sha256,
+                           temperature_conditions=metadata["conditions"],
+                           boundary_temperature_application="step_at_t0_plus",
+                           temperature_history_sampling="all_solid_nodes_including_prescribed_surface",
+                           initial_state="uniform initial temperature at t=0 before boundary application",
+                           heat_transfer_status="constraint_reaction_not_exported")
+            summary["thermal_mesh"]["prescribed_boundary_nodes"] = load.constrained_node_count
         if endpoint:
             summary.update(convection_package_sha256=package_sha256,
                            convection_conditions=metadata["conditions"],
@@ -305,9 +393,13 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
                            convection_diagnostics=metadata["diagnostics"],
                            convection_package_model_version=metadata["model_version"])
         atomic_json(output/"thermal_summary.json",summary)
-        coefficient_description = (f"spatial h={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g}" if endpoint
-                                   else f"h={settings['h']:g}")
-        print(f"[thermal] Complete: {output}; duration={settings['duration']:g} s; {coefficient_description} W/(m² K)")
+        if prescribed:
+            description = f"prescribed equilibrium surface T={float(np.min(load.surface_temperature)):g}–{float(np.max(load.surface_temperature)):g} K"
+        else:
+            coefficient_description = (f"spatial h={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g}" if endpoint
+                                       else f"h={settings['h']:g}")
+            description = coefficient_description + " W/(m² K)"
+        print(f"[thermal] Complete: {output}; duration={settings['duration']:g} s; {description}")
         return summary
     finally:
         mapdl.exit()
