@@ -32,7 +32,7 @@ def update_project(root, source, revision=None):
     selected = [name for name in tracked if
         (name.endswith(".py") and ("/" not in name or name.startswith(("pipeline/", "scripts/", "tests/"))))
         or name in ("README.md", "NOSE_TRADE_README.md", "requirements.txt", "thermal_analysis.yaml")
-        or (name.startswith("docs/") and name.endswith(".md"))
+        or (name.startswith("docs/") and name.endswith((".md", ".png")))
         or name.startswith("tests/fixtures/")
         or name.startswith("examples/reference_results/")]
     payload = {name: git(source, "show", f"{revision}:{name}") for name in selected}
