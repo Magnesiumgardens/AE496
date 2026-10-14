@@ -140,7 +140,7 @@ class ContinuationTests(unittest.TestCase):
             solution=SimpleNamespace(controls=SimpleNamespace(),methods=SimpleNamespace(spatial_discretization=SimpleNamespace(discretization_scheme=schemes)))))
         def iterate(solver,cfg,walls):
             calls.append(('iterate',cfg['solver']['max_iterations']));return {'status':'disabled'}
-        with patch('pipeline.continuation.launch_solver',return_value=solver),patch('pipeline.continuation.validate_saved_conditions'),patch('pipeline.continuation.iterate_with_history',side_effect=iterate):
+        with patch('pipeline.continuation.launch_solver',return_value=solver),patch('pipeline.continuation.validate_saved_conditions'),patch('pipeline.continuation.iterate_with_history',side_effect=iterate),patch('pipeline.continuation.configure_residual_criteria',return_value={'energy':1e-6}):
             summary=continue_solver(self.cfg,50,staged)
         self.assertEqual([call[0] for call in calls],['read','quality','iterate','write','exit'])
         self.assertFalse(summary['continuation']['initialization_performed'])
@@ -158,3 +158,32 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(),before)
         self.assertTrue((Path(result['diagnostics'])/'residual_history.csv').is_file())
         preflight(load_config(self.path))
+
+    def test_locked_optional_raw_history_does_not_rollback_solution(self):
+        from pipeline.continuation import copy_atomic
+        def runner(command,log_path,**kwargs):
+            self.runner(command,log_path,**kwargs)
+            (Path(command[command.index('--output-dir')+1])/'solver_temperature_history.out').write_text('raw history')
+        def copy(source,target):
+            if str(source).endswith('.out'):raise PermissionError('WinError 32: raw history is in use')
+            return copy_atomic(source,target)
+        with patch('pipeline.continuation.copy_atomic',side_effect=copy):
+            result=continue_case(self.path,50,_runner=runner)
+        self.assertEqual(result['status'],'complete')
+        self.assertEqual((self.work/'04_final.dat.h5').read_bytes(),b'continued 04_final.dat.h5')
+        summary=json.loads((self.work/'summary.json').read_text())
+        self.assertIn('raw_copy_warning',summary['temperature_history'])
+        self.assertTrue(Path(summary['temperature_history']['raw_report_file']).is_file())
+        self.assertTrue((Path(summary['temperature_history']['raw_report_file']).parent/'04_final.dat.h5').is_file())
+
+    def test_critical_promotion_error_keeps_candidate_pair_recoverable(self):
+        from pipeline.continuation import copy_atomic
+        def copy(source,target):
+            if str(target).endswith('04_final.dat.h5'):raise PermissionError('target data is locked')
+            return copy_atomic(source,target)
+        with patch('pipeline.continuation.copy_atomic',side_effect=copy):
+            with self.assertRaises(PermissionError):continue_case(self.path,50,_runner=self.runner)
+        self.assertEqual((self.work/'04_final.cas.h5').read_bytes(),b'old 04_final.cas.h5')
+        staged=next((self.work/'_continuation').iterdir())
+        self.assertEqual((staged/'04_final.cas.h5').read_bytes(),b'continued 04_final.cas.h5')
+        self.assertEqual((staged/'04_final.dat.h5').read_bytes(),b'continued 04_final.dat.h5')

@@ -82,3 +82,25 @@ class SolverNumericsTests(unittest.TestCase):
             initialize_flow(self.solver,self.cfg,'farfield')
         self.assertEqual(self.defaults.created,[])
         self.assertNotIn('standard',self.calls)
+
+class ResidualCriteriaTests(unittest.TestCase):
+    def test_fluent_energy_stop_is_set_to_the_screen_target_without_renormalization(self):
+        from pipeline.solver_numerics import configure_residual_criteria
+        class Entry:
+            def __init__(self):object.__setattr__(self,'values',{'absolute_criteria':1e-3,'monitor':False,'check_convergence':False})
+            def __getattr__(self,key):return SimpleNamespace(get_state=lambda:self.values[key])
+            def __setattr__(self,key,value):
+                if key not in self.values:raise AssertionError('Unsupported setting')
+                self.values[key]=value
+        entries={key:Entry() for key in ('continuity','x-velocity','y-velocity','energy')}
+        class Equations:
+            def get_object_names(self):return list(entries)
+            def __getitem__(self,key):return entries[key]
+        options=SimpleNamespace(criterion_type=SimpleNamespace(allowed_values=lambda:['absolute','relative']))
+        solver=SimpleNamespace(settings=SimpleNamespace(solution=SimpleNamespace(monitor=SimpleNamespace(
+            residual=SimpleNamespace(options=options,equations=Equations())))))
+        result=configure_residual_criteria(solver,{'solver':{}})
+        self.assertEqual(result['energy'],1e-6)
+        self.assertEqual(result['continuity'],1e-3)
+        self.assertTrue(entries['energy'].values['check_convergence'])
+        self.assertEqual(options.criterion_type,'absolute')

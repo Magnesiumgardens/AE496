@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 import yaml
 
@@ -13,9 +14,22 @@ from .aero import validate_saved_conditions
 from .cfd import launch_solver
 from .iteration_history import iterate_with_history
 from .reporting import read_csv, read_json
-from .solver_numerics import configure_numerics
+from .solver_numerics import configure_numerics, configure_residual_criteria
 from .temperature_export import atomic_csv, temperature_conditions
 from .utils import atomic_json, file_sha256, work_paths
+
+
+def copy_atomic(source,target):
+    """Replace a destination without consuming a recoverable candidate file."""
+    target = Path(target)
+    target.parent.mkdir(parents=True,exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=target.name+".",suffix=".tmp",dir=target.parent)
+    os.close(fd)
+    try:
+        shutil.copy2(source,temporary)
+        os.replace(temporary,target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def source_hashes(work):
@@ -68,6 +82,7 @@ def continue_solver(cfg, iterations, output_dir):
         if solver.settings.setup.general.solver.time.get_state() != "steady":
             raise ValueError("Continuation is restricted to steady CFD")
         summary["numerics"] = configure_numerics(solver,cfg)
+        summary["residual_criteria"] = configure_residual_criteria(solver,cfg)
         try:
             print("[continue] Mesh quality report:",flush=True)
             solver.settings.mesh.quality()
@@ -177,13 +192,23 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None):
                     message="Continued flow became unstable; previous case/data and configuration retained")
     merge_history(work,staged,summary,archive)
     atomic_json(staged/"summary.json",summary)
-    transfers = [(staged/name,work/name) for name in names[:5] if (staged/name).is_file()]
+    # Native raw report files can remain open briefly after Fluent exit. Their
+    # availability must not affect committing a completed case/data pair.
+    raw = staged/"solver_temperature_history.out"
+    if raw.is_file():
+        try:copy_atomic(raw,work/raw.name)
+        except OSError as exc:
+            summary.setdefault("temperature_history",{})["raw_report_file"] = str(raw)
+            summary["temperature_history"]["raw_copy_warning"] = str(exc)
+            print(f"[continue] Raw history retained in staging: {exc}",flush=True)
+            atomic_json(staged/"summary.json",summary)
+    transfers = [(staged/name,work/name) for name in names[:4] if (staged/name).is_file()]
     transfers.append((staged/"solver.log",work/"batch_logs/solver.log"))
     replaced=[]
     try:
         for source,target in transfers:
             target.parent.mkdir(parents=True,exist_ok=True)
-            os.replace(source,target);replaced.append(target)
+            copy_atomic(source,target);replaced.append(target)
     except Exception:
         for target in replaced:
             backup = archive/target.relative_to(work)

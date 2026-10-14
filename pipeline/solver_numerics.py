@@ -61,3 +61,36 @@ def initialize_flow(solver,cfg,farfield):
     initialization.standard_initialize()
     print(f"[solve] Initialized at freestream Mach {state['mach']:g}, T={state['static_temperature_K']:g} K",flush=True)
     return dict(method="freestream",**values)
+
+
+def configure_residual_criteria(solver,cfg):
+    """Make Fluent's own stop condition match the post-solve residual screen."""
+    residual = solver.settings.solution.monitor.residual
+    setting = residual.options.criterion_type
+    allowed = setting.allowed_values()
+    absolute = next((v for v in allowed if str(v).casefold() == "absolute"),None)
+    if absolute is None:
+        actual = setting.get_state()
+        if str(actual).casefold() != "absolute":
+            raise ValueError(f"Absolute residual criterion unavailable; actual={actual!r}, choices={allowed}")
+    else:residual.options.criterion_type = absolute
+    equations = residual.equations
+    names = equations.get_object_names()
+    expected = ("continuity","x-velocity","y-velocity","energy")
+    missing = set(expected)-set(names)
+    if missing:raise ValueError(f"Missing residual equations {sorted(missing)}; native names={names}")
+    thresholds = cfg["solver"].get("residual_thresholds",{})
+    configured = {}
+    for name in names:
+        value = float(thresholds.get(name,1e-6 if name == "energy" else 1e-3))
+        if not math.isfinite(value) or value <= 0:raise ValueError(f"Invalid residual threshold for {name}: {value}")
+        equation = equations[name]
+        equation.monitor = True
+        equation.check_convergence = True
+        equation.absolute_criteria = value
+        actual = float(equation.absolute_criteria.get_state())
+        if not math.isclose(actual,value,rel_tol=1e-9,abs_tol=1e-12):
+            raise ValueError(f"Fluent residual threshold {name}: requested {value}, returned {actual}")
+        configured[name] = actual
+    print(f"[solve] Fluent absolute residual criteria: {configured}",flush=True)
+    return configured

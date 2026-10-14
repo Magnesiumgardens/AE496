@@ -214,8 +214,9 @@ def solve_case(cfg: dict, mesh_file: str | Path) -> dict:
 
         print(f"[solve] Boundary zones after correction: {_zone_names(bc)}")
 
-        from .solver_numerics import configure_numerics, initialize_flow
+        from .solver_numerics import configure_numerics, initialize_flow, configure_residual_criteria
         summary["numerics"] = configure_numerics(solver,cfg)
+        summary["residual_criteria"] = configure_residual_criteria(solver,cfg)
         summary["initialization"] = initialize_flow(solver,cfg,far_zones[0])
 
         print(f"[solve] Writing setup case: {paths['setup_case']}")
