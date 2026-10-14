@@ -26,7 +26,7 @@ fluid-side static samples retain their own field/sampling descriptions.
 | Mechanical coupling | Supplied runner actually applies fixed `HFLUX` plus `RAD`; no recovered temperature coupling | New, explicit nodal prescribed-temperature boundary, without extra heat-transfer loads |
 | Cold/adiabatic calibration | Other uploaded YAML declared an endpoint-derived convection model | Retained compatibility implementation; bypassed by the active single-solve model |
 | Direction and launch | Earlier template uses +X and automatic Geometry launch | User-confirmed −X into the +X nose; working SpaceClaim selection retained |
-| CFD startup | Hybrid, steady density-based implicit, no explicit Courant/scheme override | Recorded native defaults unless user controls are explicit; migration preserves controls |
+| CFD startup | Original source used hybrid and native defaults; supplied successful adiabatic run used freestream, Courant 0.3 and first-order upwind | Restore the successful run's startup controls with a 4800-iteration budget; migrate generated defaults and retain explicit custom settings |
 | Mesh and gas | Mach 8, p∞ 1090 Pa, T∞ 226.5 K; planar surface, laminar ideal/Sutherland baseline | Same configured baseline; retain repaired Ansys 2025 R1 meshing and unchanged mesh |
 | Solid material | Constant tungsten `k=170`, `rho=19250`, `Cp=130` | Same configurable approximations, requiring high-temperature verification |
 | Exposure | Historical runs use 400 seconds | Configurable 200-second current default; preserve user duration |
@@ -57,6 +57,16 @@ it does not establish untracked GitHub discussions. The supplied successful
 1161-iteration regression is a **300 K fixed-temperature run**, not a validated
 radiative-equilibrium run. The original radiation branch documents and
 implements the capability; its live execution still needs verification.
+
+The successful adiabatic run reached Fluent's convergence stop at iteration
+3200 using freestream initialization, Courant 0.3 and first-order upwind. The
+later radiating-wall run used identical CAD and mesh hashes but hybrid
+initialization, native Courant 5 and second-order upwind, and repeatedly limited
+temperature and pressure. The current conservative startup restores the former
+numerical controls without changing the selected radiation wall condition or
+raising solver limits. This evidence supports a controlled numerical change,
+not a claim that the radiation case is already validated. First-order upwind
+adds numerical diffusion; scheme and mesh sensitivity remain required for CDR.
 
 Historical 5000 K clipping, an iteration budget completing, or a saved plot
 does not establish a trustworthy thermal field. Current export and Mechanical

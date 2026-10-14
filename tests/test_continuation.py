@@ -15,7 +15,7 @@ from pipeline.solution_quality import saved_quality
 from pipeline.study import BatchError, reusable, stage_files, stage_fingerprint
 from pipeline.temperature_export import atomic_csv
 from pipeline.utils import atomic_json, file_sha256
-from test_solver_numerics import ServerDictionary
+from test_solver_numerics import NativeControls, ServerDictionary
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -141,7 +141,7 @@ class ContinuationTests(unittest.TestCase):
             file=SimpleNamespace(read_case_data=read_case,write_case_data=write_case),
             setup=SimpleNamespace(general=SimpleNamespace(solver=SimpleNamespace(time=SimpleNamespace(get_state=lambda:'steady')))),
             mesh=SimpleNamespace(quality=lambda:calls.append(('quality',))),
-            solution=SimpleNamespace(controls=SimpleNamespace(),methods=SimpleNamespace(spatial_discretization=SimpleNamespace(discretization_scheme=schemes)))))
+            solution=SimpleNamespace(controls=NativeControls(),methods=SimpleNamespace(spatial_discretization=SimpleNamespace(discretization_scheme=schemes)))))
         def iterate(solver,cfg,walls):
             calls.append(('iterate',cfg['solver']['max_iterations']));return {'status':'disabled'}
         with patch('pipeline.continuation.launch_solver',return_value=solver),patch('pipeline.continuation.validate_saved_conditions'),patch('pipeline.continuation.iterate_with_history',side_effect=iterate),patch('pipeline.continuation.configure_residual_criteria',return_value={'energy':1e-6}):

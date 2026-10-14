@@ -133,5 +133,39 @@ class SingleWorkflowTests(unittest.TestCase):
         self.assertTrue((self.work/'04_final.dat.h5').is_file())
         self.assertFalse((self.work/'thermal_analysis').exists())
 
+    def test_repaired_startup_reuses_mesh_and_archives_diverged_solution_before_fresh_solve(self):
+        from pipeline.migration import migrate_config
+        self.cfg['solver'].update(initialization='hybrid',courant_number=None,
+                                  flow_scheme=None,max_iterations=1200)
+        self.write_config()
+        def diverged(command,log_path,**kwargs):
+            self.runner(command,log_path,**kwargs)
+            if Path(command[2]).name=='run_solver_only.py':
+                log_path.write_text('iter continuity x-velocity y-velocity energy time/iter\n'
+                    '1200 2.8567e10 6.1723e14 6.1523e15 3.7669e20 0:00:00 0\n'
+                    'temperature limited to 5.000000e+03 in 1264 cells\n')
+        with self.assertRaisesRegex(BatchError,'did not converge'):
+            run_case(self.path,self.thermal,_runner=diverged)
+        mesh_bytes=(self.work/'02_mesh.msh.h5').read_bytes()
+        failed_data=(self.work/'04_final.dat.h5').read_bytes()
+        self.assertFalse((self.work/'temperature').exists())
+        self.assertTrue(migrate_config(self.path))
+        repaired=load_config(self.path)
+        self.assertEqual(repaired['solver']['courant_number'],.3)
+        self.assertEqual(repaired['solver']['initialization'],'freestream')
+        self.assertEqual(repaired['thermal'],self.cfg['thermal'])
+        self.calls.clear()
+        result=self.study(stop_after='solver')
+        self.assertEqual(self.calls,['run_solver_only.py'])
+        self.assertEqual(result['stages']['mesh'],'reused')
+        self.assertEqual((self.work/'02_mesh.msh.h5').read_bytes(),mesh_bytes)
+        retained=list((self.work/'_history').glob('*/04_final.dat.h5'))
+        self.assertEqual(len(retained),1)
+        self.assertEqual(retained[0].read_bytes(),failed_data)
+        state=json.loads((self.work/'_batch/stage_state.json').read_text())
+        self.assertEqual(state['stages']['solver']['status'],'complete')
+        self.assertNotEqual(state['stages'].get('thermal',{}).get('status'),'complete')
+        self.assertFalse((self.work/'thermal_analysis').exists())
+
 
 if __name__=='__main__':unittest.main()

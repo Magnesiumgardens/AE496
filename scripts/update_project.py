@@ -92,7 +92,8 @@ def update_project(root, source, revision=None):
     print(f"[update] Installed complete study from {revision}")
     print(f"[update] Previous code/configs saved: {backup}")
     print("[update] Single radiative-equilibrium CFD selected; existing meshes and simulation results retained.")
-    print("[update] CFD numerical controls, material choices and exposure durations are retained.")
+    print("[update] Former hybrid/native startup defaults are repaired to freestream, Courant 0.3 and first-order flow.")
+    print("[update] Custom numerical controls, material choices and exposure durations are retained.")
     print("[update] Mechanical prescribes the imported wall temperature; it does not predict surface warm-up.")
     return backup
 

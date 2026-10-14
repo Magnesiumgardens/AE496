@@ -10,7 +10,12 @@ def configure_numerics(solver,cfg):
     requested_courant = options.get("courant_number", .1)
     if requested_courant is not None:
         solution.controls.courant_number = float(requested_courant)
-    courant = float(solution.controls.courant_number.get_state()) if requested_courant is None else float(requested_courant)
+    courant = float(solution.controls.courant_number.get_state())
+    if not math.isfinite(courant) or courant <= 0:
+        raise ValueError(f"Fluent returned an invalid Courant number: {courant}")
+    if requested_courant is not None and not math.isclose(
+            courant, float(requested_courant), rel_tol=1e-9, abs_tol=1e-12):
+        raise ValueError(f"Fluent Courant number: requested {requested_courant}, returned {courant}")
     schemes = solution.methods.spatial_discretization.discretization_scheme
     wanted = options.get("flow_scheme", "first-order-upwind")
     names = schemes.get_object_names()

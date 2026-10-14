@@ -129,7 +129,7 @@ def endpoint_batch_config(cfg):
 
 
 def single_solve_config(cfg):
-    """Select one radiating CFD wall, preserving successful numerical choices.
+    """Select one radiating CFD wall and repair the failed native startup.
 
     The 300 K value is reference metadata, never a prescribed CFD temperature.
     Endpoint settings are obsolete for this strategy; their saved outputs are
@@ -156,12 +156,25 @@ def single_solve_config(cfg):
     cfg["thermal"] = thermal
     solver = cfg.setdefault("solver", {})
     solver.update(primary_overrides)
-    # Explicit startup controls—including null for native settings—remain inputs.
-    # Do not repeat the prior migration's aggressive reset of a working solver.
-    solver.setdefault("initialization", "hybrid" if solver.get("hybrid_initialize", True) else "freestream")
+    # The prior generated hybrid/native profile diverged on the same mesh that
+    # converged with freestream/Courant .3/first-order. Repair that complete
+    # profile only; a custom CFL, scheme or initialization remains a user input.
+    previous_initialization = solver.get("initialization",
+        "hybrid" if solver.get("hybrid_initialize", True) else "freestream")
+    failed_native_profile = (previous_initialization == "hybrid"
+        and solver.get("courant_number") is None and solver.get("flow_scheme") is None)
+    if failed_native_profile:
+        solver.update(initialization="freestream", courant_number=.3,
+                      flow_scheme="first-order-upwind")
+        if solver.get("max_iterations", 1200) == 1200:
+            solver["max_iterations"] = 4800
+    solver.setdefault("initialization",
+        ("hybrid" if solver["hybrid_initialize"] else "freestream")
+        if "hybrid_initialize" in solver else "freestream")
     solver.pop("hybrid_initialize", None)
-    solver.setdefault("courant_number", None)
-    solver.setdefault("flow_scheme", None)
+    solver.setdefault("courant_number", .3)
+    solver.setdefault("flow_scheme", "first-order-upwind")
+    solver.setdefault("max_iterations", 4800)
     solver.setdefault("residual_thresholds", {name: 1e-3 for name in
                                             ("continuity", "x-velocity", "y-velocity", "energy")})
     solver.setdefault("temperature_history", dict(enabled=True, sample_every_iterations=25))
@@ -188,7 +201,7 @@ def single_solve_state(state):
     stages = state.setdefault("stages", {})
     names = (set(stages) - {"mesh"}) | {"solver", "temperature_export", "aero", "thermal"}
     for stage in names:
-        stages[stage] = dict(status="stale", reason="Changed CFD driver to one radiative-equilibrium wall solution")
+        stages[stage] = dict(status="stale", reason="Radiative-equilibrium CFD configuration changed")
     return state
 
 

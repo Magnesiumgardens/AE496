@@ -25,6 +25,14 @@ def endpoint_template():
     return yaml.safe_load((ROOT / "tests/fixtures/two_endpoint_config.yaml").read_text())
 
 
+def previous_single_template():
+    """Exact solver controls shipped before the stabilization correction."""
+    cfg = template()
+    cfg["solver"].update(initialization="hybrid", courant_number=None,
+                         flow_scheme=None, max_iterations=1200)
+    return cfg
+
+
 class SingleConfigurationTests(unittest.TestCase):
     def test_default_is_one_radiating_wall_with_explicit_solid_prescription(self):
         cfg = validate_config(template())
@@ -33,8 +41,10 @@ class SingleConfigurationTests(unittest.TestCase):
             emissivity=.9, external_radiation_temperature_k=3))
         self.assertEqual(cfg["flight"]["flow_direction"], [-1, 0])
         self.assertEqual(cfg["runtime"]["geometry_launch_mode"], "spaceclaim")
-        self.assertIsNone(cfg["solver"]["courant_number"])
-        self.assertIsNone(cfg["solver"]["flow_scheme"])
+        self.assertEqual(cfg["solver"]["initialization"], "freestream")
+        self.assertEqual(cfg["solver"]["courant_number"], .3)
+        self.assertEqual(cfg["solver"]["flow_scheme"], "first-order-upwind")
+        self.assertEqual(cfg["solver"]["max_iterations"], 4800)
         self.assertEqual(set(cfg["solver"]["residual_thresholds"].values()), {1e-3})
         self.assertNotIn("thermal_export", cfg)
         thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
@@ -86,6 +96,69 @@ class SingleConfigurationTests(unittest.TestCase):
         self.assertEqual(result['workflow'],{'strategy':'single_solve'})
         self.assertEqual(single_solve_config(result),result)
         validate_config(result)
+
+    def test_generated_hybrid_native_profile_is_repaired_for_both_strategies(self):
+        for previous in (previous_single_template(), endpoint_template()):
+            with self.subTest(strategy=previous["workflow"]["strategy"]):
+                before = copy.deepcopy(previous)
+                result = single_solve_config(previous)
+                self.assertEqual(previous, before)
+                self.assertEqual(result["solver"]["initialization"], "freestream")
+                self.assertEqual(result["solver"]["courant_number"], .3)
+                self.assertEqual(result["solver"]["flow_scheme"], "first-order-upwind")
+                self.assertEqual(result["solver"]["max_iterations"], 4800)
+                for name in ("geometry", "mesh", "flight", "runtime", "physics", "aero"):
+                    self.assertEqual(result[name], before[name])
+                if before["thermal"]["mode"] == "radiative_equilibrium":
+                    self.assertEqual(result["thermal"], before["thermal"])
+                self.assertEqual(single_solve_config(result), result)
+                validate_config(result)
+
+    def test_missing_solver_controls_and_legacy_hybrid_flag_use_stable_defaults(self):
+        for controls in ({}, {"hybrid_initialize": True},
+                         {"initialization": "hybrid", "courant_number": None},
+                         {"hybrid_initialize": True, "flow_scheme": None}):
+            with self.subTest(controls=controls):
+                cfg = previous_single_template()
+                cfg["solver"] = copy.deepcopy(controls)
+                result = single_solve_config(cfg)
+                self.assertEqual(result["solver"]["initialization"], "freestream")
+                self.assertEqual(result["solver"]["courant_number"], .3)
+                self.assertEqual(result["solver"]["flow_scheme"], "first-order-upwind")
+                self.assertEqual(result["solver"]["max_iterations"], 4800)
+                self.assertNotIn("hybrid_initialize", result["solver"])
+                self.assertEqual(single_solve_config(result), result)
+
+    def test_profile_repair_keeps_explicit_iteration_budget_and_radiation_environment(self):
+        cfg = previous_single_template()
+        cfg["solver"]["max_iterations"] = 6400
+        cfg["thermal"].update(emissivity=.7, external_radiation_temperature_k=250,
+                              wall_temperature_k=340)
+        before = copy.deepcopy(cfg)
+        result = single_solve_config(cfg)
+        self.assertEqual(result["solver"]["max_iterations"], 6400)
+        self.assertEqual(result["solver"]["initialization"], "freestream")
+        self.assertEqual(result["solver"]["courant_number"], .3)
+        self.assertEqual(result["thermal"], before["thermal"])
+        self.assertEqual(result["flight"], before["flight"])
+        self.assertEqual(result["mesh"], before["mesh"])
+
+    def test_explicit_numerical_overrides_are_not_reset_by_profile_repair(self):
+        examples = (
+            {"courant_number": .2},
+            {"flow_scheme": "first-order-upwind"},
+            {"initialization": "freestream"},
+            {"initialization": "freestream", "courant_number": None, "flow_scheme": None},
+            {"courant_number": 1.0, "flow_scheme": "second-order-upwind", "max_iterations": 2400},
+        )
+        for override in examples:
+            with self.subTest(override=override):
+                cfg = previous_single_template()
+                cfg["solver"].update(override)
+                result = single_solve_config(cfg)
+                for key in ("initialization", "courant_number", "flow_scheme", "max_iterations"):
+                    self.assertEqual(result["solver"][key], cfg["solver"][key])
+                self.assertEqual(single_solve_config(result), result)
 
     def test_existing_radiation_inputs_are_retained_and_missing_history_is_optional(self):
         cfg = template()
@@ -149,6 +222,59 @@ class SingleConfigurationTests(unittest.TestCase):
 
 
 class SingleInstallerTests(unittest.TestCase):
+    def test_git_installer_repairs_generated_root_and_case_profile_without_touching_mesh_or_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "source", Path(directory) / "target"
+            source.mkdir(); target.mkdir()
+            for name in ("config.yaml", "thermal_analysis.yaml", "batch.yaml"):
+                (source / name).write_bytes((ROOT / name).read_bytes())
+            (source / "study.py").write_text("# replacement source\n")
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "-c", "user.name=Stable Test",
+                "-c", "user.email=stable@example.invalid", "commit", "-qm", "fixture"], check=True)
+            (target / "study.py").write_text("# existing source\n")
+            cfg = previous_single_template()
+            cfg["thermal"].update(emissivity=.85, external_radiation_temperature_k=275)
+            case = target / "runs/blunt_1"; (case / "_batch").mkdir(parents=True)
+            cfg_paths = (target / "config.yaml", case / "_batch/config.yaml")
+            old_bytes = yaml.safe_dump(cfg).encode()
+            for path in cfg_paths: path.write_bytes(old_bytes)
+            mesh_record = {"status": "complete", "fingerprint": "verified-mesh",
+                           "outputs": {"02_mesh.msh.h5": "mesh-sha"}}
+            (case / "_batch/stage_state.json").write_text(json.dumps(dict(version=4,
+                strategy="single_solve", stages=dict(mesh=mesh_record,
+                    solver={"status": "complete", "fingerprint": "old-native-profile"}))))
+            artifacts = {name: b"retain original " + name.encode() for name in (
+                "02_mesh.msh.h5", "04_final.cas.h5", "04_final.dat.h5",
+                "temperature/wall_temperatures.csv", "thermal_results/temperature_history.csv")}
+            for name, data in artifacts.items():
+                path = case / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+            thermal_bytes = (ROOT / "thermal_analysis.yaml").read_bytes()
+            (target / "thermal_analysis.yaml").write_bytes(thermal_bytes)
+            backup = update_project(target, source)
+            for path in cfg_paths:
+                installed = yaml.safe_load(path.read_bytes())
+                self.assertEqual(installed["solver"]["initialization"], "freestream")
+                self.assertEqual(installed["solver"]["courant_number"], .3)
+                self.assertEqual(installed["solver"]["flow_scheme"], "first-order-upwind")
+                self.assertEqual(installed["solver"]["max_iterations"], 4800)
+                for name in ("geometry", "mesh", "flight", "runtime", "physics", "thermal", "aero"):
+                    self.assertEqual(installed[name], cfg[name])
+                self.assertEqual((backup / path.relative_to(target)).read_bytes(), old_bytes)
+            state = json.loads((case / "_batch/stage_state.json").read_text())
+            self.assertEqual(state["stages"]["mesh"], mesh_record)
+            self.assertEqual(state["stages"]["solver"]["status"], "stale")
+            self.assertEqual((target / "thermal_analysis.yaml").read_bytes(), thermal_bytes)
+            self.assertEqual(yaml.safe_load(thermal_bytes)["transient"]["duration_s"], 200)
+            for name, data in artifacts.items(): self.assertEqual((case / name).read_bytes(), data)
+            updated_bytes = {path: path.read_bytes() for path in cfg_paths}
+            updated_state = (case / "_batch/stage_state.json").read_bytes()
+            update_project(target, source)
+            for path, data in updated_bytes.items(): self.assertEqual(path.read_bytes(), data)
+            self.assertEqual((case / "_batch/stage_state.json").read_bytes(), updated_state)
+            for name, data in artifacts.items(): self.assertEqual((case / name).read_bytes(), data)
+
     def test_git_installer_preserves_data_and_user_configuration_across_repeated_update(self):
         with tempfile.TemporaryDirectory() as directory:
             source, target = Path(directory) / "source", Path(directory) / "target"

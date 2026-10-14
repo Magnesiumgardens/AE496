@@ -25,6 +25,24 @@ class ServerDictionary:
         return SimpleNamespace(get_state=lambda:self.values[key],allowed_values=lambda:self.choices.get(key,[]))
 
 
+class NativeControls:
+    """Assign through a setting, then read the server value back separately."""
+    def __init__(self, value=5.):
+        self.value = value
+        self.ignore_assignment = False
+        self.requests = []
+
+    @property
+    def courant_number(self):
+        return SimpleNamespace(get_state=lambda:self.value)
+
+    @courant_number.setter
+    def courant_number(self, value):
+        self.requests.append(value)
+        if not self.ignore_assignment:
+            self.value = value
+
+
 class SolverNumericsTests(unittest.TestCase):
     def setUp(self):
         self.cfg=yaml.safe_load((Path(__file__).resolve().parents[1]/'config.yaml').read_text())
@@ -40,7 +58,7 @@ class SolverNumericsTests(unittest.TestCase):
             compute_defaults=lambda **kwargs:self.calls.append(kwargs),
             standard_initialize=lambda:self.calls.append('standard'),
             hybrid_initialize=lambda:self.calls.append('hybrid'))
-        self.solution=SimpleNamespace(controls=SimpleNamespace(),initialization=initialization,
+        self.solution=SimpleNamespace(controls=NativeControls(),initialization=initialization,
             methods=SimpleNamespace(spatial_discretization=SimpleNamespace(discretization_scheme=self.schemes)))
         self.solver=SimpleNamespace(settings=SimpleNamespace(solution=self.solution))
 
@@ -50,7 +68,36 @@ class SolverNumericsTests(unittest.TestCase):
         self.assertEqual(result['flow_scheme_entry'],'amg-c')
         self.assertEqual(self.schemes.values,{'amg-c':'first-order-upwind'})
         self.assertEqual(self.schemes.created,[])
-        self.assertEqual(self.solution.controls.courant_number,.1)
+        self.assertEqual(self.solution.controls.courant_number.get_state(),.1)
+
+    def test_stable_radiative_template_overrides_native_cfl_and_scheme_before_initialization(self):
+        self.cfg=yaml.safe_load((Path(__file__).resolve().parents[1]/'config.yaml').read_text())
+        result=configure_numerics(self.solver,self.cfg)
+        initialized=initialize_flow(self.solver,self.cfg,'farfield')
+        self.assertEqual(result['courant_number'],.3)
+        self.assertEqual(self.solution.controls.requests,[.3])
+        self.assertEqual(result['flow_scheme'],'first-order-upwind')
+        self.assertEqual(result['courant_source'],'configured')
+        self.assertEqual(initialized['method'],'freestream')
+        self.assertEqual(initialized['temperature'],226.5)
+        self.assertLess(initialized['x-velocity'],0)
+        self.assertNotIn('hybrid',self.calls)
+        self.assertEqual(self.cfg['thermal']['mode'],'radiative_equilibrium')
+
+    def test_courant_change_ignored_by_server_fails_before_scheme_or_solve(self):
+        self.solution.controls.ignore_assignment=True
+        with self.assertRaisesRegex(ValueError,'requested 0.1, returned 5.0'):
+            configure_numerics(self.solver,self.cfg)
+        self.assertEqual(self.schemes.values,{'amg-c':'second-order-upwind'})
+        self.assertFalse(self.calls)
+
+    def test_nonphysical_native_courant_is_rejected(self):
+        self.cfg['solver']['courant_number']=None
+        for value in (0., -1., float('nan'), float('inf')):
+            with self.subTest(value=value):
+                self.solution.controls.value=value
+                with self.assertRaisesRegex(ValueError,'invalid Courant'):
+                    configure_numerics(self.solver,self.cfg)
 
     def test_flow_alias_is_supported_only_when_exposed_by_server(self):
         self.schemes.values={'flow':'second-order-upwind'}

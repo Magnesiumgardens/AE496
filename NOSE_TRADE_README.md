@@ -23,6 +23,14 @@ cold-wall or adiabatic solution cannot satisfy the new radiating-wall model.
 Current figures check source hashes and use equilibrium/prescribed-temperature
 labels; historical reference data must be explicitly selected.
 
+The conservative startup uses freestream initialization, Courant 0.3,
+first-order upwind and a 4800-iteration budget, following the numerical controls
+in the successful adiabatic run. Updates migrate the previous generated
+hybrid/native defaults and retain explicit custom controls and budgets. Run
+through `--stop-after solver` first; a changed solver setup starts fresh while
+reusing unchanged mesh data. The radiation case still needs live verification,
+and first-order results need scheme and mesh sensitivity checks for CDR.
+
 Review nose orientation, radiation environment, reference width, tungsten
 properties and exposure before batching. Default airflow remains toward −X,
 SpaceClaim remains selected, and the current default exposure is 200 seconds.

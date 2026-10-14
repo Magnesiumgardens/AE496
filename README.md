@@ -29,11 +29,14 @@ The maintained Git branch is `codex/nose-trade-foundation`. From your existing A
 ```powershell
 .\.venv\Scripts\python.exe study.py update
 if ($LASTEXITCODE -eq 0) {
-    .\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after thermal
+    .\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after solver
+    if ($LASTEXITCODE -eq 0) {
+        .\.venv\Scripts\python.exe study.py run --config ".\runs\blunt_1\_batch\config.yaml" --stop-after thermal
+    }
 }
 ```
 
-The updater backs up source/configuration under `logs/source_backups/`, preserves CAD, meshes and simulation files, and selects the single radiating-wall strategy. Existing explicit numerical controls, flight direction and exposure duration are retained. Prior cold-wall/adiabatic outputs cannot satisfy a radiative-equilibrium export. Meshes with unchanged CAD and mesh settings can be reused; changed solver outputs are retained under `_history/` before a new solve.
+The updater backs up source/configuration under `logs/source_backups/`, preserves CAD, meshes and simulation files, and selects the single radiating-wall strategy. It replaces the previous generated hybrid/native startup defaults with the conservative controls below; explicit custom numerical controls and iteration budgets, flight direction and exposure duration are retained. The changed solver settings start a fresh solve and archive previous solver outputs under `_history/`, while unchanged CAD and mesh settings reuse the mesh. Mechanical runs only after the new solution passes the numerical screen. Prior cold-wall/adiabatic outputs cannot satisfy a radiative-equilibrium export.
 
 For an installation predating `study.py update`, bootstrap through authenticated Git:
 
@@ -88,7 +91,19 @@ Changing only material settings or exposure reuses valid CFD exports and reruns 
 
 ## Convergence and continuation
 
-The template uses hybrid initialization, 1200 iterations and recorded Fluent native Courant/discretization defaults unless explicitly configured. Migration retains existing explicit controls. The baseline residual targets are **1e-3 for flow and energy**, synchronized with Fluent's native stopping criteria. These targets are not a temperature error bound. Recent temperature/pressure limiting, nonfinite residuals or a failed screen block downstream Mechanical loading.
+The template uses the numerical setup from the supplied successful adiabatic run:
+
+```yaml
+solver:
+  initialization: freestream
+  courant_number: 0.3
+  flow_scheme: first-order-upwind
+  max_iterations: 4800
+```
+
+That run converged at iteration 3200. The later divergent radiating-wall run used the same CAD and mesh hashes, but hybrid initialization, native Courant 5 and second-order upwind. This change restores the successful startup controls while retaining the approved radiating-wall physics; it does not establish that the radiation case will converge. First-order upwind provides a conservative starting solution and adds numerical diffusion, so check scheme and mesh sensitivity before using the results for CDR.
+
+The baseline residual targets are **1e-3 for flow and energy**, synchronized with Fluent's native stopping criteria. These targets are not a temperature error bound. Temperature and pressure limits are not raised to conceal divergence. Recent limiting, nonfinite residuals or a failed screen block downstream Mechanical loading.
 
 For a stable, unconverged single solution, continue the saved field without initializing again:
 

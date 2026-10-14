@@ -76,13 +76,14 @@ thermal:
 solver:
   density_solver: density-based-implicit
   steady: true
-  max_iterations: 1200
+  max_iterations: 4800
   run_iterations: true
-  # Restore the original successful startup. null keeps Fluent's native values;
-  # set an explicit number/scheme to make a deliberate numerical change.
-  initialization: hybrid
-  courant_number: null
-  flow_scheme: null
+  # Conservative controls from the earlier converged run on this same mesh.
+  # Native Courant=5/second-order/hybrid startup diverged with the Radiation wall.
+  # Fluent can stop before this budget when its residual criteria are met.
+  initialization: freestream
+  courant_number: 0.3
+  flow_scheme: first-order-upwind
   # Screening targets match Fluent's stopping criteria; passing this screen
   # still requires temperature/force stability and mesh sensitivity review.
   residual_thresholds:
