@@ -1,6 +1,5 @@
-# One steady planar CFD solve with an externally radiating equilibrium wall.
-# Mechanical then PRESCRIBES the solved surface temperature and predicts
-# conduction into the tungsten; it does not predict the surface warm-up.
+# Primary steady RE CFD plus a cold-wall calibration on the same mesh.
+# Mechanical solves surface warm-up with calibrated convection and radiation.
 # Batch generates a separate case config and work directory for each CAD file.
 
 project:
@@ -64,6 +63,16 @@ physics:
 
 workflow:
   strategy: single_solve
+
+calibration:
+  enabled: true
+  cold_wall_temperature_k: 300.0
+  # Fluent heat-flux is outward from this fluid domain; verify this convention.
+  heat_flux_into_wall_sign: -1.0
+  temperature_field_name: temperature
+  heat_flux_field_name: heat-flux
+  min_delta_temperature_k: 25.0
+  coordinate_tolerance_m: 1.0e-9
 
 thermal:
   # Fluent solves Tw from gas-side heating and external radiative loss.

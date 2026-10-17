@@ -20,7 +20,7 @@ class StudyResumeTests(unittest.TestCase):
         self.geometry = self.root / "nose.x_t"
         self.geometry.write_text("original geometry")
         self.config = self.root / "case.yaml"
-        self.cfg = yaml.safe_load((REPO_ROOT / "config.yaml").read_text())
+        self.cfg = yaml.safe_load((REPO_ROOT / "tests/fixtures/prescribed_reference/config.yaml").read_text())
         self.cfg.pop("workflow", None);self.cfg.pop("thermal_export", None)
         self.cfg["thermal"] = {"mode":"adiabatic"}
         self.cfg["solver"].update(initialization="freestream",courant_number=.1,

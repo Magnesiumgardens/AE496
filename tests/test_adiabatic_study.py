@@ -30,6 +30,7 @@ def config(work):
     # These regressions exercise the earlier direct-adiabatic path explicitly;
     # the application template now selects one radiative-equilibrium solve.
     cfg.pop("workflow", None)
+    cfg.pop("calibration", None)
     cfg.pop("thermal_export", None)
     cfg["thermal"] = {"mode": "adiabatic"}
     cfg["solver"].update(initialization="freestream", courant_number=.1,
@@ -278,7 +279,8 @@ class FullUpdateTests(unittest.TestCase):
             (target / "thermal_analysis.yaml").write_text(yaml.safe_dump(thermal))
             backup = update_project(target, source)
             installed = yaml.safe_load((target / "thermal_analysis.yaml").read_text())
-            self.assertEqual(installed["loading"]["mode"], "prescribed_temperature")
+            self.assertEqual(installed["loading"]["mode"], "aerodynamic_surface_load")
+            self.assertTrue(installed["include_radiation"])
             self.assertNotIn("heat_transfer_coefficient_w_m2k", installed["loading"])
             self.assertEqual(installed["transient"]["duration_s"], 180)
             self.assertEqual(load_config(case / "_batch/config.yaml")["thermal"],

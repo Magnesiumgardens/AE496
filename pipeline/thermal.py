@@ -19,6 +19,7 @@ from .trade_study import thermal_screening_metrics
 MODEL_VERSION = "3.0-temperature-convection"
 ENDPOINT_MODEL_VERSION = "4.0-endpoint-convection"
 PRESCRIBED_MODEL_VERSION = "5.0-prescribed-temperature"
+AEROTHERMAL_MODEL_VERSION = "6.0-aerodynamic-surface-load"
 STEFAN_BOLTZMANN = 5.670374419e-8
 
 
@@ -98,6 +99,24 @@ def wall_rows(time, load, wall_temperature, nnum, indices, distances, settings):
         settings["emissivity"] * STEFAN_BOLTZMANN * (wall_temperature**4 - settings["trad"]**4)
         if settings["include_rad"] else np.zeros(len(load.xy))
     )
+    if load.mode == "aerodynamic_surface_load":
+        return [
+            {
+                "time_s": float(time), "surface_order_index": index,
+                "x_m": float(point[0]), "y_m": float(point[1]),
+                "nearest_thermal_node_id": int(nnum[indices[index]]),
+                "nearest_thermal_node_distance_m": float(distances[index]),
+                "wall_temperature_K": float(wall_temperature[index]),
+                "convective_heat_flux_into_solid_W_m2": float(incoming[index]),
+                "radiative_heat_flux_out_W_m2": float(radiation[index]),
+                "net_heat_flux_into_solid_W_m2": float(incoming[index] - radiation[index]),
+                "aerodynamic_conductance_W_m2K": float(load.coefficient[index]),
+                "effective_driving_temperature_K": float(load.gas_temperature[index]),
+                "outside_calibration_temperature_range": bool(wall_temperature[index] < load.cold_temperature[index]
+                                                               or wall_temperature[index] > load.equilibrium_temperature[index]),
+            }
+            for index, point in enumerate(load.xy)
+        ]
     rows = [
         {
             "time_s": float(time), "surface_order_index": index,
@@ -147,7 +166,8 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
     snapshots = [{"result_set": 0, "time_s": 0.0, "temperature_K": initial}]
     selected = select_snapshots(len(times), max_frames)
     prescribed = load.mode == "prescribed_temperature"
-    surface_power = [] if prescribed else [[0.0, integrate_boundary(load.xy, np.asarray([
+    aerodynamic = load.mode == "aerodynamic_surface_load"
+    surface_power = [] if prescribed or aerodynamic else [[0.0, integrate_boundary(load.xy, np.asarray([
         row["net_surface_heat_flux_into_wall_W_m2"] for row in wall_history]))]]
     final = None
     for number, (time, values) in enumerate(zip(times, temperatures), 1):
@@ -159,7 +179,7 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
             raise ThermalAnalysisError("MAPDL wall temperatures do not match the prescribed CFD surface field")
         rows = wall_rows(time, load, values[indices], nnum, indices, distances, settings)
         wall_history.extend(rows)
-        if not prescribed:
+        if not prescribed and not aerodynamic:
             surface_power.append([float(time), integrate_boundary(load.xy, np.asarray([
                 row["net_surface_heat_flux_into_wall_W_m2"] for row in rows]))])
         if number in selected:
@@ -167,6 +187,10 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
         final = values
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    net_heat_load = None
+    if aerodynamic:
+        from .aerothermal_results import save_surface_energy
+        net_heat_load = save_surface_energy(output, load, wall_history, [initial, *temperatures], times, settings, write_csv)
     write_csv(output / "temperature_history.csv", history)
     write_csv(output / "wall_temperature_history.csv", wall_history)
     write_csv(output / "thermal_nodes_final.csv", [
@@ -179,14 +203,16 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
         row["thermal_wall_temperature_K"] = row["wall_temperature_K"]
         final_wall.append(row)
     write_csv(output / "wall_temperature_final.csv", final_wall)
-    boundary_data = ({"boundary_prescribed_temperature_K": load.surface_temperature} if prescribed else
+    boundary_data = ({"boundary_aerodynamic_conductance_W_m2K": load.coefficient,
+                      "boundary_aerodynamic_source_W_m2": load.aerodynamic_source,
+                      "boundary_effective_driving_temperature_K": load.gas_temperature} if aerodynamic else
+                     {"boundary_prescribed_temperature_K": load.surface_temperature} if prescribed else
                      {"boundary_gas_temperature_K":load.gas_temperature, "convection_coefficient_W_m2K":load.coefficient}
                      if load.mode == "convection" else {"boundary_flux_W_m2":load.cold_flux})
     np.savez_compressed(output / "thermal_snapshots.npz", node_ids=nnum, coordinates_m=xyz,
         boundary_xy_m=load.xy, time_s=[snap["time_s"] for snap in snapshots],
         temperatures_K=np.asarray([snap["temperature_K"] for snap in snapshots]), **boundary_data)
-    net_heat_load = None
-    if not prescribed:
+    if not prescribed and not aerodynamic:
         power = np.asarray(surface_power)
         net_heat_load = float(np.sum(0.5 * (power[1:, 1] + power[:-1, 1]) * np.diff(power[:, 0])))
     return history, snapshots, temperature_stats(final), net_heat_load
@@ -197,10 +223,11 @@ def apply_surface_loads(mapdl, lines, load, settings):
         if settings["include_rad"]:
             raise ThermalAnalysisError("Prescribed temperature cannot also apply Mechanical radiation on the same boundary")
         return  # D,TEMP is assigned to all boundary nodes after meshing.
-    coefficients = np.broadcast_to(np.asarray(load.coefficient), (len(load.xy),)) if load.mode == "convection" else None
+    convective = load.mode in {"convection", "aerodynamic_surface_load"}
+    coefficients = np.broadcast_to(np.asarray(load.coefficient), (len(load.xy),)) if convective else None
     for index, line in enumerate(lines):
         next_index = (index + 1) % len(lines)
-        if load.mode == "convection":
+        if convective:
             mapdl.sfl(line, "CONV", float(coefficients[index]), float(coefficients[next_index]),
                       float(load.gas_temperature[index]), float(load.gas_temperature[next_index]))
         else:  # Historical direct-flux utilities, never selected by the new runner.
@@ -286,6 +313,10 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     if load.mode == "prescribed_temperature":
         _progress("Mapping the prescribed surface-temperature field onto the solid mesh")
         apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size)
+    elif load.mode == "aerodynamic_surface_load":
+        from .aerothermal_loading import prepare_boundary_quadrature
+        count = prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size)
+        _progress(f"Implicit temperature-dependent gas heating plus radiation on {count} solved boundary nodes; no TEMP constraints")
     mapdl.finish()
     mapdl.slashsolu()
     mapdl.antype("TRANS")
@@ -338,7 +369,18 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         raise ThermalAnalysisError("--run-dir disagrees with the selected CFD config")
     endpoint = cfg.get("workflow", {}).get("strategy") == "two_endpoint"
     prescribed = settings["loading_mode"] == "prescribed_temperature"
-    if endpoint:
+    aerodynamic = settings["loading_mode"] == "aerodynamic_surface_load"
+    if aerodynamic:
+        from .aerothermal_calibration import verify_surface_package, calibration_paths
+        from .aerothermal_loading import read_load as read_aerothermal_load
+        boundary, metadata = verify_surface_package(cfg)
+        load = read_aerothermal_load(boundary)
+        surface_package_sha256 = file_sha256(calibration_paths(cfg)["summary"])
+        radiation = metadata["radiation"]
+        if not (math.isclose(float(radiation["emissivity"]), settings["emissivity"], rel_tol=1e-10, abs_tol=1e-12)
+                and math.isclose(float(radiation["external_radiation_temperature_K"]), settings["trad"], rel_tol=1e-10, abs_tol=1e-12)):
+            raise ThermalAnalysisError("Mechanical radiation settings disagree with the verified CFD calibration package.")
+    elif endpoint:
         from .endpoint_loading import verify_convection_package, convection_paths
         boundary, metadata = verify_convection_package(cfg)
         actual_minimum = metadata["diagnostics"]["minimum_absolute_delta_temperature_K"]
@@ -390,23 +432,33 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         history, snapshots, final, net_heat = save_results(output,load,nnum,xyz,temperatures,times,
             settings,mesh_size,ta_cfg.get("visualization",{}).get("max_animation_frames",60))
         viz = dict(ta_cfg.get("visualization",{}), save_heat_flux_image=False)
-        if prescribed:
-            viz["loading_mode"] = "prescribed_temperature"
+        if prescribed or aerodynamic:
+            viz["loading_mode"] = load.mode
         from .reporting import create_thermal_visualizations
         _progress("Generating thermal plots")
         figures = create_thermal_visualizations(output,load.xy,np.zeros(len(load.xy)),xyz,history,snapshots,viz)
-        loading_limits = (["The steady CFD radiative-equilibrium wall temperature is prescribed on every Mechanical boundary node.",
+        loading_limits = (["Gas-side heating is an affine wall-temperature law calibrated from cold-wall and radiative-equilibrium CFD states; no surface temperature is prescribed.",
+                           "MAPDL evaluates native CONV and RAD loads at the current solved boundary temperature within each nonlinear thermal iteration.",
+                           "H and effective driving temperature are each linearly interpolated on each reconstructed straight boundary line; their product need not equal a linearly interpolated affine source between vertices.",
+                           "The affine law is extrapolated without clipping outside its two-state calibration temperature range; the effective driving temperature is not a directly sampled CFD gas temperature.",
+                           "Boundary energies use quadratic FE boundary-temperature interpolation and five-point spatial Gaussian quadrature, then trapezoidal integration over physical saved substeps.",
+                           "Integrated surface energy is an independent postprocessed heat input, not a native constraint reaction or verified global internal-energy balance."] if aerodynamic else
+                          ["The steady CFD radiative-equilibrium wall temperature is prescribed on every Mechanical boundary node.",
                            "The surface temperature steps to the imported field at t=0+ and remains fixed; only the interior temperature response is predicted.",
                            "No convection coefficient or boundary heat flux is inferred; prescribed-temperature reaction heat is not exported.",
                            "Radiation is included in the CFD equilibrium surface model and is not applied again on the prescribed Mechanical boundary."] if prescribed else
                           ["Steady matched CFD endpoints define spatial h and recovery temperature; both remain fixed throughout exposure.",
                            "The derived h is calibrated at the cold-wall temperature; wall-temperature dependence requires further calibration."] if endpoint else
                           ["Constant steady CFD recovery temperature and specified uniform h throughout exposure."])
-        summary = dict(status="complete", model_version=PRESCRIBED_MODEL_VERSION if prescribed else ENDPOINT_MODEL_VERSION if endpoint else MODEL_VERSION,
-            loading_mode="prescribed_temperature" if prescribed else "convective_from_cfd" if endpoint else "convection",
+        result_names = ["wall_temperature_history.csv", "thermal_nodes_final.csv", "temperature_history.csv"]
+        if aerodynamic:
+            result_names += ["surface_heat_flux_history.csv", "surface_energy_history.csv", "global_energy_history.csv",
+                             "thermal_snapshots.npz", "wall_temperature_final.csv"]
+        summary = dict(status="complete", model_version=AEROTHERMAL_MODEL_VERSION if aerodynamic else PRESCRIBED_MODEL_VERSION if prescribed else ENDPOINT_MODEL_VERSION if endpoint else MODEL_VERSION,
+            loading_mode="aerodynamic_surface_load" if aerodynamic else "prescribed_temperature" if prescribed else "convective_from_cfd" if endpoint else "convection",
             backend="Mechanical APDL", material=ta_cfg["material"], analysis={**ta_cfg["transient"], "initial_temperature_k":settings["initial_t"]},
             thermal_config_path=str(Path(thermal_config).resolve()), thermal_config_sha256=thermal_config_sha256,
-            result_sha256={name:file_sha256(output/name) for name in ("wall_temperature_history.csv", "thermal_nodes_final.csv", "temperature_history.csv")},
+            result_sha256={name:file_sha256(output/name) for name in result_names},
             settings=settings, thermal_configuration=ta_cfg, boundary_csv_sha256=boundary_sha256,
             source_sha256=metadata["source_sha256"], final_temperature=final,
             thermal_mesh=dict(nodes=len(nnum),elements=n_elements,size_m=mesh_size),
@@ -423,6 +475,21 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
                            initial_state="uniform initial temperature at t=0 before boundary application",
                            heat_transfer_status="constraint_reaction_not_exported")
             summary["thermal_mesh"]["prescribed_boundary_nodes"] = load.constrained_node_count
+        if aerodynamic:
+            summary.update(surface_package_sha256=surface_package_sha256,
+                           source_surface_load_summary_sha256=surface_package_sha256,
+                           surface_load_conditions=metadata["conditions"],
+                           surface_load_derivation=metadata["derivation"],
+                           surface_load_diagnostics=metadata["diagnostics"],
+                           boundary_temperature_application="solved_with_implicit_CONV_and_RAD",
+                           temperature_history_sampling="solved_wall_vertices_and_all_solid_nodes",
+                           initial_state="uniform initial temperature; finite surface heating begins at t=0",
+                           heat_transfer_status="postprocessed_temperature_dependent_convective_and_radiative_fluxes",
+                           energy_method={"local": "trapezoid_in_time_at_original_CFD_vertices",
+                                          "global_space": "5_point_Gaussian_quadrature_on_all_quadratic_FE_boundary_edges",
+                                          "global_time": "trapezoid_over_saved_physical_substeps_including_initial_flux",
+                                          "units_local": "J/m2", "units_global": "J/m_per_unit_span",
+                                          "native_internal_energy_balance_verified": False})
         if endpoint:
             summary.update(convection_package_sha256=package_sha256,
                            convection_conditions=metadata["conditions"],
@@ -432,6 +499,8 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         atomic_json(output/"thermal_summary.json",summary)
         if prescribed:
             description = f"prescribed equilibrium surface T={float(np.min(load.surface_temperature)):g}–{float(np.max(load.surface_temperature)):g} K"
+        elif aerodynamic:
+            description = f"calibrated H={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g} W/(m² K), implicit radiation; surface temperature solved"
         else:
             coefficient_description = (f"spatial h={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g}" if endpoint
                                        else f"h={settings['h']:g}")

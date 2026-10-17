@@ -85,13 +85,18 @@ def validate_config(cfg):
     if strategy not in (None, "two_endpoint", "single_solve"):
         raise ConfigError("workflow.strategy must be single_solve or two_endpoint when specified")
     if strategy == "single_solve":
-        if cfg["thermal"]["mode"] != "radiative_equilibrium":
+        calibration = cfg.get("_calibration_kind") == "cold_wall" and cfg.get("_study_work_dir")
+        if calibration:
+            if cfg["thermal"]["mode"] != "fixed_temperature":
+                raise ConfigError("The marked cold calibration requires fixed_temperature")
+            positive("thermal.wall_temperature_k", _required(cfg, "thermal.wall_temperature_k"))
+        elif cfg["thermal"]["mode"] != "radiative_equilibrium":
             raise ConfigError("The single-solve workflow requires thermal.mode=radiative_equilibrium")
-        emissivity = positive("thermal.emissivity", _required(cfg, "thermal.emissivity"))
+        emissivity = positive("thermal.emissivity", cfg["thermal"].get("emissivity", .9) if calibration else _required(cfg, "thermal.emissivity"))
         if emissivity > 1:
             raise ConfigError("thermal.emissivity must be greater than zero and at most one")
         positive("thermal.external_radiation_temperature_k",
-                 _required(cfg, "thermal.external_radiation_temperature_k"))
+                 cfg["thermal"].get("external_radiation_temperature_k", 3) if calibration else _required(cfg, "thermal.external_radiation_temperature_k"))
         if "wall_temperature_k" in cfg["thermal"]:
             positive("thermal.wall_temperature_k (reference only)", cfg["thermal"]["wall_temperature_k"])
     elif strategy == "two_endpoint":

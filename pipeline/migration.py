@@ -129,11 +129,11 @@ def endpoint_batch_config(cfg):
 
 
 def single_solve_config(cfg):
-    """Select one radiating CFD wall and repair the failed native startup.
+    """Select primary radiating CFD and a separate cold-wall load calibration.
 
     The 300 K value is reference metadata, never a prescribed CFD temperature.
-    Endpoint settings are obsolete for this strategy; their saved outputs are
-    deliberately left on disk for review and are not new thermal inputs.
+    The legacy adiabatic endpoint is retired. Cold-wall flux calibrates the
+    new temperature-dependent heating law; it is never a fixed thermal load.
     """
     cfg = copy.deepcopy(cfg)
     workflow = cfg.setdefault("workflow", {})
@@ -179,6 +179,11 @@ def single_solve_config(cfg):
                                             ("continuity", "x-velocity", "y-velocity", "energy")})
     solver.setdefault("temperature_history", dict(enabled=True, sample_every_iterations=25))
     cfg.pop("thermal_export", None)
+    cfg["calibration"] = _with_defaults(cfg.get("calibration", {}), dict(
+        enabled=True, cold_wall_temperature_k=300.0, heat_flux_into_wall_sign=-1.0,
+        temperature_field_name="temperature", heat_flux_field_name="heat-flux",
+        min_delta_temperature_k=25.0, coordinate_tolerance_m=1e-9))
+    cfg["calibration"]["enabled"] = True
     export = cfg.setdefault("temperature_export", {})
     export["enabled"] = True
     for key, value in dict(output_directory="temperature", static_temperature_field="temperature",
@@ -194,14 +199,18 @@ def single_solve_config(cfg):
     return cfg
 
 
-def single_solve_state(state):
+def single_solve_state(state, old_cfg=None, new_cfg=None):
     """Keep mesh provenance and invalidate results from a different wall model."""
     state = copy.deepcopy(state)
     state.update(version=4,strategy="single_solve")
     stages = state.setdefault("stages", {})
-    names = (set(stages) - {"mesh"}) | {"solver", "temperature_export", "aero", "thermal"}
+    unchanged_primary = (old_cfg is not None and new_cfg is not None
+        and old_cfg.get("workflow", {}).get("strategy") == "single_solve"
+        and all(old_cfg.get(key) == new_cfg.get(key) for key in
+                ("geometry", "mesh", "flight", "physics", "thermal", "solver", "temperature_export", "aero", "outputs")))
+    names = {"calibration", "thermal"} if unchanged_primary else (set(stages) - {"mesh"}) | {"solver", "temperature_export", "aero", "calibration", "thermal"}
     for stage in names:
-        stages[stage] = dict(status="stale", reason="Radiative-equilibrium CFD configuration changed")
+        stages[stage] = dict(status="stale", reason="Surface load calibration changed" if unchanged_primary else "Radiative-equilibrium CFD configuration changed")
     return state
 
 
@@ -216,19 +225,18 @@ def _with_defaults(existing, defaults):
 
 
 def single_solve_thermal_config(cfg, defaults=None):
-    """Prescribe imported equilibrium wall temperatures in the solid model.
-
-    Radiation already sets the CFD equilibrium temperature. Adding RAD or CONV
-    to the same prescribed-temperature solid boundary would not predict its
-    warm-up, so both are excluded from this explicit loading formulation.
-    """
+    """Select calibrated temperature-dependent heating with solved wall values."""
     previous = copy.deepcopy(cfg or {})
     result = _with_defaults(previous, defaults or {})
-    if (previous.get("loading", {}) or {}).get("mode") != "prescribed_temperature":
-        result["loading"] = {"mode": "prescribed_temperature"}
+    if (previous.get("loading", {}) or {}).get("mode") != "aerodynamic_surface_load":
+        result["loading"] = {"mode": "aerodynamic_surface_load"}
     else:
-        result.setdefault("loading", {})["mode"] = "prescribed_temperature"
-    result["include_radiation"] = False
+        result.setdefault("loading", {})["mode"] = "aerodynamic_surface_load"
+    result["include_radiation"] = True
+    # The CFD wall supplies the shared radiative environment for both anchors
+    # and transient loading; old duplicate TA defaults must not override it.
+    result.pop("emissivity", None)
+    result.pop("radiation_temperature_k", None)
     return result
 
 
@@ -260,7 +268,7 @@ def migrate_config(path):
     if path.parent.name == "_batch" and state_path.is_file():
         shutil.copy2(state_path, path.parent / f"stage_state_before_single_solve_{stamp}.json")
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state = single_solve_state(state)
+        state = single_solve_state(state, old, new)
         state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     path.write_text(yaml.safe_dump(new, sort_keys=False), encoding="utf-8")
     print(f"[migrate] Single radiative-equilibrium config: {path}; previous config: {backup}")

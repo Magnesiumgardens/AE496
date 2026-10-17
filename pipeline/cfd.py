@@ -46,7 +46,7 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
     if not inspect:
         from .solution_quality import require_usable_solution
         quality = require_usable_solution(cfg)
-        if endpoint and quality.get("status") != "residual_screen_passed":
+        if (endpoint or cfg.get("_calibration_kind")) and quality.get("status") != "residual_screen_passed":
             raise ValueError("Endpoint exports require a matching passed residual screen")
         if (cfg["thermal"].get("mode") == "radiative_equilibrium"
                 and quality.get("status") != "residual_screen_passed"):
@@ -69,6 +69,12 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         if endpoint and (thermal or cfg.get("_endpoint_kind") == "cold_wall"):
             from .endpoint_export import export_endpoint
             result["endpoint"] = export_endpoint(solver,cfg,walls)
+        if cfg.get("_calibration_kind") == "cold_wall":
+            from .endpoint_export import export_endpoint
+            result["calibration"] = export_endpoint(solver, cfg, walls)
+        elif cfg.get("calibration", {}).get("enabled", False) and cfg["thermal"]["mode"] == "radiative_equilibrium":
+            from .aerothermal_calibration import export_re_calibration
+            result["calibration"] = export_re_calibration(solver, cfg, walls)
         if thermal:
             mode = cfg["thermal"]["mode"]
             label = ("radiative-equilibrium wall and near-wall fluid temperatures"

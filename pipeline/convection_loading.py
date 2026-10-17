@@ -26,6 +26,9 @@ class ConvectionLoad:
 
 def validate_settings(cfd_cfg, cfg):
     if cfd_cfg.get("thermal", {}).get("mode") == "radiative_equilibrium":
+        if cfg.get("loading", {}).get("mode") == "aerodynamic_surface_load":
+            from .aerothermal_loading import validate_settings as aerodynamic_settings
+            return aerodynamic_settings(cfd_cfg, cfg)
         from .prescribed_loading import validate_settings as prescribed_settings
         return prescribed_settings(cfd_cfg, cfg)
     endpoint = cfd_cfg.get("workflow", {}).get("strategy") == "two_endpoint"

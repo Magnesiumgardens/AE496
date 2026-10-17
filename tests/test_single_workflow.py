@@ -20,6 +20,7 @@ from test_adiabatic_study import field_solver
 from test_nose_trade import fluent
 
 ROOT=Path(__file__).resolve().parents[1]
+PRESCRIBED_FIXTURES=ROOT/'tests/fixtures/prescribed_reference'
 GOOD_LOG='iter continuity x-velocity y-velocity energy time/iter\n1161 9.9e-4 1.2e-4 6.0e-5 1.1e-4 0:00:00 0\n'
 
 
@@ -27,12 +28,14 @@ class SingleWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name); self.work=self.root/'runs/nose'; self.work.mkdir(parents=True)
-        self.cfg=yaml.safe_load((ROOT/'config.yaml').read_text())
+        # Preserve coverage of the explicitly selected legacy temperature BC;
+        # the application template now selects calibrated surface heating.
+        self.cfg=yaml.safe_load((PRESCRIBED_FIXTURES/'config.yaml').read_text())
         self.cfg['project'].update(name='nose',work_dir=str(self.work))
         cad=self.root/'nose.x_t'; cad.write_text('CAD fixture'); self.cfg['geometry']['input_file']=str(cad)
         self.cfg['runtime']['meshing_release_delay_s']=0
         self.path=self.work/'_batch/config.yaml'; self.path.parent.mkdir(); self.write_config()
-        ta=yaml.safe_load((ROOT/'thermal_analysis.yaml').read_text()); ta['visualization']['enabled']=False
+        ta=yaml.safe_load((PRESCRIBED_FIXTURES/'thermal_analysis.yaml').read_text()); ta['visualization']['enabled']=False
         self.thermal=self.root/'thermal.yaml'; self.thermal.write_text(yaml.safe_dump(ta))
         self.calls=[]
 
@@ -81,7 +84,7 @@ class SingleWorkflowTests(unittest.TestCase):
 
     def study(self,**kwargs):return run_case(self.path,self.thermal,_runner=self.runner,**kwargs)
 
-    def test_default_run_requires_one_solver_and_separate_prescribed_temperature_analysis(self):
+    def test_explicit_prescribed_run_requires_one_solver_and_separate_temperature_analysis(self):
         result=self.study()
         self.assertEqual(self.calls,['run_all.py','run_solver_only.py','export_temperature_only.py','export_aero_only.py','run_thermal_analysis.py'])
         self.assertEqual(result['status'],'complete')

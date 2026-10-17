@@ -1,4 +1,4 @@
-# One radiative-equilibrium CFD solve -> prescribed-temperature Mechanical study.
+# Primary RE CFD + cold calibration -> transient surface-load Mechanical study.
 geometry_directory: ./geometry_batch
 geometry_glob: "*.x_t"
 base_config: ./config.yaml
@@ -25,6 +25,9 @@ timeouts:
   aero:
     hard_s: 1200
     inactivity_s: 600
+  calibration:
+    hard_s: 9000
+    inactivity_s: 1200
   thermal:
     hard_s: 5400
     inactivity_s: 1200

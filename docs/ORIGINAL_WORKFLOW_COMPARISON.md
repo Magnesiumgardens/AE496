@@ -1,8 +1,12 @@
-# Original evidence and the selected single-solve model
+# Historical evidence for the earlier prescribed-temperature model
 
-The latest user-approved model replaces the active two-endpoint strategy with
+This document records the previous model decision. The active implementation
+now uses [RE/cold calibration and solved transient surface heating](aerodynamic_surface_load.md).
+The comparisons below describe the earlier prescribed-temperature version.
+
+The earlier user-approved model replaced the active two-endpoint strategy with
 one radiative-equilibrium CFD solve and explicitly prescribed surface-temperature
-loading in Mechanical. That approval supersedes the earlier instruction to
+loading in Mechanical. That approval superseded the earlier instruction to
 derive `h` from cold-wall and adiabatic endpoints.
 
 The uploaded original `pipeline/solve.py` contains a radiative-equilibrium

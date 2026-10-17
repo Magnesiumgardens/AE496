@@ -1,0 +1,122 @@
+# One steady planar CFD solve with an externally radiating equilibrium wall.
+# Mechanical then PRESCRIBES the solved surface temperature and predicts
+# conduction into the tungsten; it does not predict the surface warm-up.
+# Batch generates a separate case config and work directory for each CAD file.
+
+project:
+  name: _batch_template
+  work_dir: ./runs/_batch_template
+
+runtime:
+  processors: 4
+  fluent_gui: false
+  geometry_launch_mode: spaceclaim
+  fluent_start_timeout_s: 300
+  fluent_version: "25.1.0"
+  geometry_version: 251
+  geometry_start_timeout_s: 300
+  meshing_release_delay_s: 10
+
+geometry:
+  input_file: ./geometry_batch/blunt_1.x_t
+  input_kind: prepared_fluid_surface
+  auto_label: true
+  body_wall_name: body_wall
+  farfield_name: farfield
+  outer_edge_tolerance_fraction: 1.0e-7
+
+mesh:
+  length_unit: m
+  global_min_size: 0.00020
+  global_max_size: 0.020
+  curvature_normal_angle_deg: 18.0
+
+  # Strong local curvature refinement remains active for near-wall temperature gradients.
+  body_min_size: 0.00015
+  body_max_size: 0.0010
+  body_curvature_normal_angle_deg: 8.0
+
+  # Boundary layers matter for viscous drag and near-wall resolution.
+  # Retry without inflation only after an explicit boundary-layer stage marker.
+  # Cases with different boundary-layer settings are not ranked together.
+  boundary_layer:
+    enabled: true
+    number_of_layers: 20
+    first_layer_height: 1.0e-5
+    growth_rate: 1.15
+    offset_method: last-ratio
+
+flight:
+  mach: 8.0
+  static_pressure_pa: 1090.0
+  static_temperature_k: 226.5
+  flow_direction: [-1.0, 0.0]
+
+physics:
+  viscous_model: laminar
+  operating_pressure_pa: 0.0
+  air:
+    density_model: ideal-gas
+    viscosity_model: sutherland
+    sutherland_reference_viscosity: 1.716e-5
+    sutherland_reference_temperature_k: 273.11
+    sutherland_effective_temperature_k: 110.56
+
+workflow:
+  strategy: single_solve
+
+thermal:
+  # Fluent solves Tw from gas-side heating and external radiative loss.
+  mode: radiative_equilibrium
+  # Reference only: this is not the prescribed Fluent wall temperature.
+  wall_temperature_k: 300.0
+  emissivity: 0.90
+  external_radiation_temperature_k: 3.0
+
+solver:
+  density_solver: density-based-implicit
+  steady: true
+  max_iterations: 4800
+  run_iterations: true
+  # Conservative controls from the earlier converged run on this same mesh.
+  # Native Courant=5/second-order/hybrid startup diverged with the Radiation wall.
+  # Fluent can stop before this budget when its residual criteria are met.
+  initialization: freestream
+  courant_number: 0.3
+  flow_scheme: first-order-upwind
+  # Screening targets match Fluent's stopping criteria; passing this screen
+  # still requires temperature/force stability and mesh sensitivity review.
+  residual_thresholds:
+    continuity: 1.0e-3
+    x-velocity: 1.0e-3
+    y-velocity: 1.0e-3
+    energy: 1.0e-3
+  temperature_history:
+    enabled: true
+    sample_every_iterations: 25
+
+temperature_export:
+  enabled: true
+  output_directory: temperature
+  static_temperature_field: temperature
+  # Optional nodal fluid map; wall and fluid-side face temperatures are required.
+  export_fluid_nodes: true
+
+outputs:
+  write_case_data: true
+
+# Planar sectional screening, not an axisymmetric or whole-vehicle model.
+aero:
+  enabled: true
+  model_kind: planar_section
+  # A_ref / span. Select ONE justified common width for all nose candidates.
+  # null exports N/m forces but deliberately leaves Cd and Cl undefined.
+  reference_area_per_unit_span_m: null
+  reference_length_m: null
+  ratio_of_specific_heats: 1.4
+  gas_constant_j_kgk: 287.05
+
+reporting:
+  # Geometric nose is +X in these profiles, independent of velocity direction.
+  nose_direction: [1.0, 0.0]
+  wall_mean: simple

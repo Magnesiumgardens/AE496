@@ -14,12 +14,27 @@ def mechanical_complete(work, cfg):
         work = Path(work)
         summary = read_json(work / "thermal_analysis/thermal_summary.json")
         endpoint = cfg.get("workflow", {}).get("strategy") == "two_endpoint"
-        prescribed = cfg.get("thermal", {}).get("mode") == "radiative_equilibrium"
-        model = "5.0-prescribed-temperature" if prescribed else ("4.0-endpoint-convection" if endpoint else "3.0-temperature-convection")
+        aerodynamic = summary.get("loading_mode") == "aerodynamic_surface_load"
+        prescribed = not aerodynamic and cfg.get("thermal", {}).get("mode") == "radiative_equilibrium"
+        model = ("6.0-aerodynamic-surface-load" if aerodynamic else
+                 ("5.0-prescribed-temperature" if prescribed else
+                  ("4.0-endpoint-convection" if endpoint else "3.0-temperature-convection")))
         if summary.get("model_version") != model or summary.get("status") != "complete":return False
         if prescribed and summary.get("loading_mode") != "prescribed_temperature":return False
         if file_sha256(summary["thermal_config_path"]) != summary["thermal_config_sha256"]:return False
-        if endpoint:
+        if aerodynamic:
+            from .aerothermal_calibration import verify_surface_package, calibration_paths
+            boundary, metadata = verify_surface_package(cfg)
+            if cfg.get("thermal", {}).get("mode") != "radiative_equilibrium" or endpoint:return False
+            if load_yaml(summary["thermal_config_path"]).get("loading", {}).get("mode") != "aerodynamic_surface_load":return False
+            if summary.get("source_sha256") != metadata["source_sha256"]:return False
+            if summary.get("surface_package_sha256") != file_sha256(calibration_paths(cfg)["summary"]):return False
+            if summary.get("surface_load_conditions") != metadata["conditions"]:return False
+            required = {"wall_temperature_history.csv", "temperature_history.csv", "thermal_nodes_final.csv",
+                        "surface_heat_flux_history.csv", "surface_energy_history.csv", "global_energy_history.csv",
+                        "wall_temperature_final.csv", "thermal_snapshots.npz"}
+            if not required <= set(summary.get("result_sha256", {})):return False
+        elif endpoint:
             from .endpoint_loading import verify_convection_package, convection_paths
             boundary, metadata = verify_convection_package(cfg)
             if summary.get("source_sha256") != metadata["source_sha256"]:return False

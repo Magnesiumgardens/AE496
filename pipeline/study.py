@@ -22,10 +22,11 @@ from .reporting import (build_result_row, create_comparison_outputs, load_yaml,
                         read_json, save_batch_summary)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STAGES = ("mesh", "solver", "temperature_export", "aero", "thermal")
+STAGES = ("mesh", "solver", "temperature_export", "aero", "calibration", "thermal")
 INVALIDATES = {
     "mesh": STAGES, "solver": STAGES[1:],
-    "temperature_export": ("temperature_export", "thermal"), "aero": ("aero",), "thermal": ("thermal",),
+    "temperature_export": ("temperature_export", "calibration", "thermal"), "aero": ("aero",),
+    "calibration": ("calibration", "thermal"), "thermal": ("thermal",),
 }
 
 
@@ -63,12 +64,16 @@ def file_hash(path):
 
 def stage_files(work, cfg):
     from .temperature_export import temperature_paths
+    from .aerothermal_calibration import calibration_paths
+    calibration = calibration_paths(cfg)
     csv_path, summary_path = temperature_paths(cfg)
     return {
         "mesh": [work / "02_mesh.msh.h5"],
         "solver": [work / "04_final.cas.h5", work / "04_final.dat.h5"],
         "temperature_export": [csv_path, summary_path],
         "aero": [work / "aero_summary.json"],
+        "calibration": [calibration[key] for key in ("faces", "nodes", "summary", "cold_summary")]
+                       + [calibration["cold_work"] / name for name in ("04_final.cas.h5", "04_final.dat.h5")],
         "thermal": [work / "thermal_analysis/thermal_summary.json", work / "thermal_analysis/wall_temperature_history.csv", work / "thermal_analysis/thermal_nodes_final.csv"],
     }
 
@@ -80,6 +85,7 @@ def stage_fingerprint(stage, cfg, thermal_cfg, outputs):
         "solver": ("flight", "physics", "thermal", "solver", "geometry"),
         "temperature_export": ("geometry", "temperature_export", "flight", "physics", "thermal"),
         "aero": ("geometry", "flight", "physics", "thermal", "aero"),
+        "calibration": ("geometry", "flight", "physics", "thermal", "solver", "calibration"),
         "thermal": ("geometry", "flight", "physics", "thermal", "temperature_export"),
     }[stage]
     values = {key: copy.deepcopy(cfg.get(key, {})) for key in keys}
@@ -87,11 +93,13 @@ def stage_fingerprint(stage, cfg, thermal_cfg, outputs):
         values["geometry"].pop("input_file", None)
     if stage == "thermal":values["mechanical"] = thermal_cfg
     inputs = {"geometry": file_hash(cfg["geometry"]["input_file"])}
-    if stage == "thermal":
+    aerodynamic = thermal_cfg.get("loading", {}).get("mode") == "aerodynamic_surface_load"
+    if stage == "thermal" and not aerodynamic:
         from .temperature_export import temperature_paths
         inputs["wall_nodes"] = file_hash(temperature_paths(cfg)[0].parent / "wall_temperature_nodes.csv")
     dependencies = {"mesh": (), "solver": ("mesh",), "temperature_export": ("solver",),
-                    "aero": ("solver",), "thermal": ("solver", "temperature_export")}[stage]
+                    "aero": ("solver",), "calibration": ("mesh", "solver", "temperature_export"),
+                    "thermal": ("solver", "temperature_export", "calibration") if aerodynamic else ("solver", "temperature_export")}[stage]
     for dependency in dependencies:
         inputs[dependency] = {str(path.name): file_hash(path) for path in outputs[dependency]}
     return hashlib.sha256(json.dumps(dict(version=2, settings=values, inputs=inputs),
@@ -120,7 +128,9 @@ def validate_stage_outputs(stage, paths):
                     if not math.isfinite(value) or value <= 0:raise ValueError(f"Invalid {key}")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise BatchError(f"Invalid temperature_export output: {exc}") from exc
-    elif stage == "thermal" and (read_json(paths[0]).get("loading_mode") not in ("convection","prescribed_temperature") or read_json(paths[0]).get("status") != "complete"):
+    elif stage == "calibration" and read_json(paths[2]).get("status") != "complete":
+        raise BatchError("Calibration package does not report a complete result")
+    elif stage == "thermal" and (read_json(paths[0]).get("loading_mode") not in ("convection","prescribed_temperature","aerodynamic_surface_load") or read_json(paths[0]).get("status") != "complete"):
         raise BatchError("Mechanical summary must report the selected temperature-driven loading")
     elif stage == "aero" and read_json(paths[0]).get("status") != "complete":
         raise BatchError("aero summary does not report a complete result")
@@ -290,6 +300,8 @@ def _archive_stage(stage, work, cfg, state):
         if cfg.get("workflow",{}).get("strategy") == "single_solve":candidates.append(work/"cfd")
         state["stages"].pop("thermal_export", None)
         state["stages"].pop("thermal", None)
+    if "calibration" in INVALIDATES[stage]:
+        candidates.append(work / "cfd/cold_calibration")
     if "thermal" in INVALIDATES[stage]:candidates.append(work / "thermal_analysis")
     existing = [path for path in dict.fromkeys(candidates) if path.exists()]
     if not existing:
@@ -337,6 +349,9 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
         thermal_config_path = Path(thermal_config_path).resolve()
         thermal_cfg = load_yaml(thermal_config_path)
         validate_settings(cfg, thermal_cfg)
+        if (thermal_cfg.get("loading", {}).get("mode") == "aerodynamic_surface_load"
+                and not cfg.get("calibration", {}).get("enabled", False)):
+            raise BatchError("aerodynamic_surface_load requires calibration.enabled: true in the case config; run study.py update to migrate it")
     enabled = set(STAGES if _enabled_stages is None else _enabled_stages)
     files = stage_files(work, cfg)
     state_path = work / "_batch/stage_state.json"
@@ -349,10 +364,13 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
         "solver": ["run_solver_only.py", *arguments],
         "temperature_export": ["export_temperature_only.py", *arguments],
         "aero": ["export_aero_only.py", *arguments],
+        "calibration": ["run_calibration.py", *arguments],
         "thermal": ["run_thermal_analysis.py", *arguments, "--thermal-config", str(thermal_config_path)],
     }
     started, outcomes = time.monotonic(), {}
     for stage in STAGES[:STAGES.index(stop_after) + 1]:
+        if stage == "calibration" and not cfg.get("calibration", {}).get("enabled", False):
+            continue
         fingerprint = stage_fingerprint(stage, cfg, thermal_cfg, files)
         record = state["stages"].get(stage)
         try:
@@ -363,6 +381,10 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
             if single and stage == "thermal":
                 from .mechanical_reporting import mechanical_complete
                 if not mechanical_complete(work,cfg):raise BatchError("Mechanical results are stale or use a different load model")
+            if stage == "calibration":
+                from .aerothermal_calibration import verify_surface_package
+                try:verify_surface_package(cfg)
+                except (ValueError, OSError, RuntimeError) as exc:raise BatchError(str(exc)) from exc
             valid_outputs = True
         except BatchError:
             valid_outputs = False
@@ -375,7 +397,7 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
             print(f"[resume] {cfg['project']['name']}: {stage} unchanged")
             outcomes[stage] = "reused"
             continue
-        can_adopt = resume and _allow_adopt and record is None and valid_outputs and stage not in ("solver", "thermal")
+        can_adopt = resume and _allow_adopt and record is None and valid_outputs and stage not in ("solver", "thermal", "calibration")
         if can_adopt and stage == "mesh" and Path(cfg["geometry"]["input_file"]).stat().st_mtime_ns > files[stage][0].stat().st_mtime_ns:
             can_adopt = False
         if stage == "aero" and can_adopt:
@@ -433,7 +455,10 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                 if not temperature_complete(cfg):raise BatchError("Exported temperatures are stale or incompatible with radiative equilibrium")
             if single and stage == "thermal":
                 from .mechanical_reporting import mechanical_complete
-                if not mechanical_complete(work,cfg):raise BatchError("Prescribed-temperature Mechanical results lack current provenance")
+                if not mechanical_complete(work,cfg):raise BatchError("Mechanical results lack current provenance")
+            if stage == "calibration":
+                from .aerothermal_calibration import verify_surface_package
+                verify_surface_package(cfg)
         except Exception as exc:
             state["stages"][stage] = dict(status="failed", fingerprint=fingerprint, error=str(exc))
             _save_state(state_path, state)
@@ -460,12 +485,12 @@ def write_case_config(base_cfg, geometry_file, case_name, case_dir, config_path,
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         shutil.copy2(config_path, config_path.parent / f"config_previous_{stamp}.yaml")
         if not (config_path.parent / "stage_state.json").exists():
-            changed_keys = {key for key in ("geometry", "mesh", "flight", "physics", "thermal", "solver",
+            changed_keys = {key for key in ("geometry", "mesh", "flight", "physics", "thermal", "solver", "calibration",
                                             "aero", "temperature_export", "reporting") if old.get(key) != cfg.get(key)}
             affected = set()
             for key in changed_keys:
                 first = ("mesh" if key in ("geometry", "mesh") else "solver" if key in ("flight", "physics", "thermal", "solver")
-                         else "temperature_export" if key in ("temperature_export", "reporting") else "aero")
+                         else "temperature_export" if key in ("temperature_export", "reporting") else "calibration" if key == "calibration" else "aero")
                 affected.update(INVALIDATES[first])
             if affected:
                 _save_state(config_path.parent / "stage_state.json", {"version": 2, "stages": {
@@ -495,7 +520,7 @@ def main(batch_config_path="batch.yaml"):
     endpoint = base.get("workflow",{}).get("strategy") == "two_endpoint"
     enabled = set(ENDPOINT_STAGES if endpoint else STAGES)
     if not batch.get("run_cfd", True):
-        enabled -= {"mesh", "cold_wall", "adiabatic"} if endpoint else {"mesh", "solver"}
+        enabled -= {"mesh", "cold_wall", "adiabatic"} if endpoint else {"mesh", "solver", "calibration"}
     rows = []
     for geometry, name in zip(geometries, names):
         directory, started = runs / name, time.monotonic()

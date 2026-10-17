@@ -47,7 +47,7 @@ def update_project(root, source, revision=None):
             state_path = path.parent / "stage_state.json"
             if path.parent.name == "_batch" and state_path.is_file():
                 state = json.loads(state_path.read_text(encoding="utf-8"))
-                payload[str(state_path.relative_to(root))] = (json.dumps(single_solve_state(state), indent=2) + "\n").encode()
+                payload[str(state_path.relative_to(root))] = (json.dumps(single_solve_state(state, old, new), indent=2) + "\n").encode()
     batch_path = root / "batch.yaml"
     batch = yaml.safe_load(batch_path.read_bytes()) if batch_path.is_file() else yaml.safe_load(git(source, "show", f"{revision}:batch.yaml"))
     batch = single_solve_batch_config(batch)
@@ -94,7 +94,7 @@ def update_project(root, source, revision=None):
     print("[update] Single radiative-equilibrium CFD selected; existing meshes and simulation results retained.")
     print("[update] Former hybrid/native startup defaults are repaired to freestream, Courant 0.3 and first-order flow.")
     print("[update] Custom numerical controls, material choices and exposure durations are retained.")
-    print("[update] Mechanical prescribes the imported wall temperature; it does not predict surface warm-up.")
+    print("[update] Cold-wall calibration enables solved surface warm-up with convection and radiation; no prescribed wall temperature.")
     return backup
 
 

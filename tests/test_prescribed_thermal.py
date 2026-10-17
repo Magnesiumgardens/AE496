@@ -18,16 +18,19 @@ from pipeline.thermal_loading import ThermalAnalysisError
 from pipeline.utils import file_sha256
 
 ROOT = Path(__file__).resolve().parents[1]
+PRESCRIBED_FIXTURES = ROOT / "tests/fixtures/prescribed_reference"
 
 
 def configurations(work):
-    cfd = yaml.safe_load((ROOT / "config.yaml").read_text())
+    # This module deliberately tests the retained prescribed-temperature mode,
+    # rather than inheriting whichever loading model the new template selects.
+    cfd = yaml.safe_load((PRESCRIBED_FIXTURES / "config.yaml").read_text())
     cfd["project"] = {"name": work.name, "work_dir": str(work)}
     cfd["geometry"]["input_file"] = str(work.parent / "nose.x_t")
     cfd["workflow"] = {"strategy": "single_solve"}
     cfd["thermal"] = {"mode": "radiative_equilibrium", "emissivity": .9,
                       "external_radiation_temperature_k": 3., "wall_temperature_k": 300.}
-    thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
+    thermal = yaml.safe_load((PRESCRIBED_FIXTURES / "thermal_analysis.yaml").read_text())
     thermal["loading"] = {"mode": "prescribed_temperature"}
     thermal["include_radiation"] = False
     thermal["initial_temperature_k"] = 300.

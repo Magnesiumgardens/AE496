@@ -1,0 +1,35 @@
+# Separate Mechanical APDL solid solve with a prescribed CFD wall temperature.
+# The imported equilibrium temperature is enforced at the surface; this model
+# predicts conduction into tungsten, not a convective surface warm-up.
+mapdl_version: 251
+processors: 4
+# Bound license/server startup separately from the full Mechanical stage.
+mapdl_start_timeout_s: 120
+mesh_size_m: null
+initial_temperature_k: 300.0
+include_radiation: false
+emissivity: 0.9
+radiation_temperature_k: 226.5
+loading:
+  mode: prescribed_temperature
+material:
+  name: Tungsten
+  # Constant-property approximation: verify values for the relevant temperature range.
+  conductivity_w_mk: 170.0
+  density_kg_m3: 19250.0
+  specific_heat_j_kgk: 130.0
+transient:
+  duration_s: 200.0
+  initial_time_step_s: 2.0
+  min_time_step_s: 0.2
+  max_time_step_s: 10.0
+visualization:
+  enabled: true
+  save_final_temperature_image: true
+  save_heat_flux_image: false
+  save_temperature_history_image: true
+  make_gif: false
+  max_animation_frames: 60
+  dpi: 160
+design_limits:
+  max_temperature_k: null

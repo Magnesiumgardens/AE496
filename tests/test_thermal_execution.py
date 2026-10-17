@@ -25,13 +25,13 @@ class MechanicalCase:
     def __init__(self, root, launch_timeout=42):
         self.work = root / "runs/nose"
         self.work.mkdir(parents=True)
-        cfd = yaml.safe_load((ROOT / "config.yaml").read_text())
+        cfd = yaml.safe_load((ROOT / "tests/fixtures/prescribed_reference/config.yaml").read_text())
         cfd["project"] = {"name": "nose", "work_dir": str(self.work)}
         cfd["geometry"]["input_file"] = str(root / "nose.x_t")
         self.cfd_path = self.work / "_batch/config.yaml"
         self.cfd_path.parent.mkdir()
         self.cfd_path.write_text(yaml.safe_dump(cfd))
-        self.thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
+        self.thermal = yaml.safe_load((ROOT / "tests/fixtures/prescribed_reference/thermal_analysis.yaml").read_text())
         self.thermal["mapdl_start_timeout_s"] = launch_timeout
         self.thermal["transient"].update(duration_s=2., initial_time_step_s=1.,
                                          min_time_step_s=.1, max_time_step_s=2.)

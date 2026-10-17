@@ -1,0 +1,144 @@
+# Calibrated aerodynamic surface heating
+
+This is the active thermal coupling for `single_solve` /
+`radiative_equilibrium` primary CFD and `aerodynamic_surface_load` Mechanical
+loading. The primary flow calculation is unchanged; the extra cold-wall flow
+calculation is a wall-state calibration only. No flight-condition sweep is
+performed.
+
+## Heating relation and signs
+
+At each geometrically matched CFD wall face, the code uses:
+
+\[
+q''_{eq}=\epsilon\sigma(T_{eq}^4-T_{rad}^4),\quad
+H=\frac{q''_{cold}-q''_{eq}}{T_{eq}-T_{cold}},\quad
+B=q''_{cold}+H T_{cold}.
+\]
+
+The transient solid boundary balance is
+
+\[
+q''_{net}(s,T_w)=\underbrace{B(s)-H(s)T_w}_{q''_{conv}\text{ into solid}}
+-\underbrace{\epsilon\sigma(T_w^4-T_{rad}^4)}_{q''_{rad}\text{ out}}.
+\]
+
+Positive net heat flux heats the solid. Native Fluent cold-wall flux retains
+its raw value and uses the explicitly configured sign
+`calibration.heat_flux_into_wall_sign` (default −1); the calibration does not
+take absolute values or automatically flip signs. Nonpositive identified
+conductance or insufficient separation between calibration temperatures is
+rejected.
+
+`pipeline/aerothermal_calibration.py` exports and matches face centroids,
+closed-loop endpoints, zone names, geometry and the common mesh hash. Native
+face indices may differ after parallel repartitioning. The root RE solution
+and the cold state each require a matching passed CFD residual screen.
+
+The RE convective anchor is calculated from external radiation balance.
+The code does not relabel Fluent's generic Radiation-wall `heat-flux` field
+as separated convective flux. The two anchors identify one affine heating
+law; they do not establish a nonlinear gas correlation valid for every wall
+temperature. The fitted `B/H` is an equivalent driving temperature, not an
+independently measured gas temperature.
+
+## Mechanical implementation
+
+`pipeline/aerothermal_loading.py` supplies native MAPDL `CONV` and `RAD`
+loads on the reconstructed closed polygon. `H` and `B/H` are each linearly
+interpolated along each boundary segment; their product need not be a linear
+interpolation of `B`. Native nonlinear iterations evaluate both loads using
+the current FE surface temperature. No `D,TEMP` condition is applied in this
+mode, and cold-wall flux is not held fixed throughout exposure.
+
+The initial temperature is uniform 300 K by default. Full transient
+conduction uses PLANE293 thermal elements, automatic time stepping and the
+configured duration. In `thermal_analysis.yaml`:
+
+```yaml
+initial_temperature_k: 300.0
+loading:
+  mode: aerodynamic_surface_load
+include_radiation: true
+# Emissivity and radiation temperature are inherited from CFD.
+transient:
+  duration_s: 200.0
+  initial_time_step_s: 2.0
+  min_time_step_s: 0.2
+  max_time_step_s: 10.0
+```
+
+Set only `duration_s: 400.0` for the same conditions over 400 s. Optional
+Mechanical emissivity and radiation-temperature overrides must match the
+primary CFD equilibrium calibration; otherwise they are inherited from CFD.
+The RE radiation term identifies an incoming gas-heating anchor; the same
+physical outgoing radiation is then evaluated in the transient solid
+balance. No RE net wall load or constrained temperature is added to that
+balance.
+
+## Files and units
+
+The primary RE solution remains `04_final.cas.h5` / `04_final.dat.h5`.
+The calibration solution is under `cfd/cold_calibration/`. The matched package
+is in `thermal_bc/surface_load_faces.csv`, `surface_load_nodes.csv` and
+`surface_load_summary.json`. It records `T_eq`, `T_cold`, cold/RE gas-heating
+anchors, conductance/source, projection diagnostics and hashes for both
+case/data pairs. The current Mechanical summary model version is
+`6.0-aerodynamic-surface-load`.
+
+Under `thermal_analysis/`:
+
+| File | Physical content |
+|---|---|
+| `wall_temperature_history.csv` | Solved wall samples at original CFD boundary vertices versus `time_s`; temperatures in K, coordinates in m. No prescribed-temperature column. |
+| `temperature_history.csv` | All-solid nodal minimum, arithmetic mean and maximum temperature in K versus seconds. |
+| `surface_heat_flux_history.csv` | `convective_heat_flux_into_solid_W_m2`, `radiative_heat_flux_out_W_m2`, `net_heat_flux_into_solid_W_m2` versus seconds and surface index. |
+| `surface_energy_history.csv` | `cumulative_convective_energy_J_m2`, `cumulative_radiative_energy_J_m2`, `cumulative_net_energy_J_m2` at each surface index. |
+| `global_energy_history.csv` | Spatially integrated `convective_power_per_unit_span_W_m`, `radiative_power_per_unit_span_W_m`, `net_power_per_unit_span_W_m` and corresponding `cumulative_*_energy_per_unit_span_J_m`. |
+| `thermal_nodes_final.csv` / `thermal_snapshots.npz` | Final nodal temperatures / selected physical-time spatial fields. |
+
+The local net energy is
+
+\[
+Q''(s,t)=\int_0^t q''_{net}(s,\tau)\,d\tau
+\]
+
+and is evaluated by trapezoidal integration over saved physical substeps,
+including the finite heat flux at the initial uniform temperature. The
+initial cumulative energy is zero. Global powers use five-point Gaussian
+quadrature on all selected quadratic FE boundary edges, followed by the
+same temporal integration. They are an independent postprocessed boundary
+integral, not a native MAPDL internal-energy or reaction-flux verification.
+
+Per-nose `reports/` and `runs/comparison/solid/` contain solved wall-temperature
+curves, final wall/solid plots, local flux and energy histories and global
+power/energy histories. Local comparison curves use arithmetic means of the
+original wall samples, not exact boundary averages. Global histories retain
+the solver's spatial integration. Only current packages and result hashes
+are accepted by Mechanical reports.
+
+`solver_temperature_history.csv` remains indexed by Fluent convergence
+iteration. It is not physical time or an input to the transient solid solver.
+
+## Current approximations and validation limits
+
+- One fixed flight condition and laminar planar CFD; no AoA/Mach sweep or
+  CFD/solid feedback during the exposure. Drag/lift remain primary RE values.
+- The gas-heating law is affine in wall temperature with fixed spatial
+  coefficients. It extrapolates without clipping outside the calibration
+  interval; a two-point fit does not establish accuracy there.
+- Face-to-vertex projection and line interpolation introduce documented
+  errors. Radiation of a projected temperature is not the projection of
+  radiation at the original face temperatures; the imported equilibrium
+  temperatures need not be exact stationary states of the projected law.
+- Constant tungsten conductivity 170 W/(m·K), density 19,250 kg/m³ and heat
+  capacity 130 J/(kg·K); constant emissivity 0.9. No oxidation, temperature
+  dependent emissivity/material tables, ablation, melting, stress or creep.
+- Filled planar solid reconstructed from CFD wall vertices, with unit span;
+  no attached-airframe/contact thermal model or three-dimensional vehicle.
+- Residual screens, mocked command tests and offline thermal/energy tests do
+  not replace native engine verification, conservation checks or mesh,
+  timestep, scheme and physical-property sensitivity studies.
+
+The cloud environment has no licensed Fluent or Mechanical engines. Live
+calibration and nonlinear thermal execution must be verified on Windows.
