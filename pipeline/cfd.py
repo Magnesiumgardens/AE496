@@ -101,6 +101,8 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
         if aero:
             try:
                 print("[export] Computing body-wall forces from saved solution...", flush=True)
+                from .force_history import recheck_saved_force_history
+                recheck_saved_force_history(solver, cfg, walls)
                 result["aerodynamics"] = aerodynamic_summary(solver, cfg, walls)
                 result["aerodynamics"]["source_case"] = str(paths["final_case"])
                 result["aerodynamics"]["source_sha256"] = {key:file_sha256(paths[key]) for key in ("final_case","final_data")}

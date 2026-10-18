@@ -59,10 +59,29 @@ zero. Lift is recorded but is not an additional optimization objective or
 acceptance threshold. These are sampled stability screens, not proof that
 every possible unsteady fluctuation has been resolved.
 
-The native raw report records every iteration. The final force state must
-match the final native report calculation; actual iteration metadata is used
-when available. Missing or inconsistent histories never receive a passing
-status. Residual screening remains a separate requirement.
+The native raw report records every iteration. Its labeled iteration column
+provides the measured indices, and both last-recorded forces must match the
+final native report calculation. Integers returned alongside report-compute
+values are not assumed to count completed iterations. Missing or inconsistent
+histories never receive a passing status. Residual screening remains separate.
+
+If a continuation has already recorded forces but the adapter rejected them,
+update and try `study.py export --config <case.yaml>`. Export can recheck a
+matching saved raw recording against the loaded final force values without
+performing more CFD iterations. It requires matching recorded raw-file hashes,
+conditions, body walls and checkpoint hashes. Changed or unrelated recordings
+cannot be repaired by relabeling them. Previous verification metadata is saved
+under `solver_diagnostics/force_history_before_recheck_*.json`.
+
+To inspect a failure without opening Ansys or changing any data:
+
+```powershell
+.\.venv\Scripts\python.exe study.py force-status --config ".\runs\blunt_1\_batch\config.yaml"
+```
+
+This prints the underlying recording error, final force comparison and native
+file header/tail. `not_verified` alone does not mean that drag is unstable; it
+can also indicate an unavailable recording, parsing error or stale source.
 
 Updates retain existing CFD results. Their absent force histories cannot be
 created from a final force value. To collect one from the developed solution:
@@ -75,8 +94,14 @@ if ($LASTEXITCODE -eq 0) {
 .\.venv\Scripts\python.exe study.py report --runs-dir runs
 ```
 
-Continuation performs no initialization or numerical-model change. Two hundred
-additional iterations are a recording budget, not a promise of convergence.
+Continuation performs no initialization or numerical-model change. When stable
+forces are required, residual-only automatic stopping is temporarily deferred
+for the requested continuation window. This prevents a previously converged
+case from stopping after one or two iterations before enough force samples
+are recorded. Residual monitoring and thresholds remain unchanged, the
+original stop flags are restored before saving, and final residual acceptance
+still applies. Two hundred additional iterations are a recording budget,
+not a promise of convergence.
 The last five samples still have to meet the configured tolerance, and the
 residual screen must pass. This command stops before cold-wall calibration or
 Mechanical. A later full study rebuilds downstream results if their source

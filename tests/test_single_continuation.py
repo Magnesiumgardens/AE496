@@ -102,10 +102,11 @@ class SingleContinuationTests(unittest.TestCase):
             ),
         )
 
-        def iterate(engine, segment, zones):
+        def iterate(engine, segment, zones, **kwargs):
             self.assertIs(engine, solver)
             self.assertEqual(segment["solver"]["max_iterations"], 50)
             self.assertEqual(zones, ["body_wall"])
+            self.assertTrue(kwargs["force_recording_window"])
             calls.append("iterate")
             return {"temperature_history": {"status": "disabled"}, "force_history": {"status": "disabled"}}
 

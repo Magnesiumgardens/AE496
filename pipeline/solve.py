@@ -303,7 +303,8 @@ def solve_case(cfg: dict, mesh_file: str | Path, *, reference_cfg: dict | None =
             print(f"[solve] Writing final case/data: {paths['final_case']}")
             solver.settings.file.write_case_data(file_name=str(paths["final_case"]))
             for history in ("temperature_history", "force_history"):
-                if summary.get(history, {}).get("status") in ("complete", "partial"):
+                if (summary.get(history, {}).get("status") in ("complete", "partial")
+                        or (history == "force_history" and summary.get(history, {}).get("status") == "unavailable")):
                     summary[history]["source_sha256"] = {
                         key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
 

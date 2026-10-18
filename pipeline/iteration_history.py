@@ -2,6 +2,7 @@
 import math
 from pathlib import Path
 import shlex
+from contextlib import contextmanager
 
 from .temperature_export import atomic_csv
 from .utils import file_sha256
@@ -84,7 +85,39 @@ def _finish_temperature_history(raw_path, report):
                 interpretation="Steady CFD convergence versus measured Fluent iteration; not physical time.")
 
 
-def iterate_with_histories(solver, cfg, wall_names, *, record_forces=True):
+@contextmanager
+def _defer_residual_stop(solver, enabled):
+    """Collect a requested force window without an immediate residual-only stop.
+
+    Equation monitoring and residual thresholds remain unchanged. Restore the
+    original stop flags even on an iterate failure, before saving a checkpoint.
+    """
+    original = []
+    try:
+        if enabled:
+            equations = solver.settings.solution.monitor.residual.equations
+            for name in equations.get_object_names():
+                equation = equations[name]
+                value = equation.check_convergence.get_state()
+                if not isinstance(value, bool):
+                    raise ValueError(f"Unexpected residual convergence-stop flag for {name}: {value!r}")
+                original.append((name, equation, value))
+                equation.check_convergence = False
+                if equation.check_convergence.get_state() is not False:
+                    raise ValueError(f"Could not defer residual-only stopping for force recording: {name}")
+            if not original:
+                raise ValueError("No residual stopping controls are available for the force-recording window")
+            print("[force-history] Recording the requested continuation window; residual thresholds remain unchanged", flush=True)
+        yield {"residual_stopping_temporarily_disabled": bool(enabled),
+               "original_residual_stop_flags": {name: value for name, _, value in original}}
+    finally:
+        for name, equation, value in original:
+            equation.check_convergence = value
+            if equation.check_convergence.get_state() is not value:
+                raise ValueError(f"Could not restore the residual convergence-stop flag for {name}")
+
+
+def iterate_with_histories(solver, cfg, wall_names, *, record_forces=True, force_recording_window=False):
     """Configure both monitors around one unchanged native steady iterate call."""
     iterations = int(cfg["solver"].get("max_iterations", 1200))
     iterate = solver.settings.solution.run_calculation.iterate
@@ -106,7 +139,11 @@ def iterate_with_histories(solver, cfg, wall_names, *, record_forces=True):
             print(f"[temperature-history] Native recording unavailable: {exc}; continuing the steady solve.", flush=True)
     # Keep Fluent's original single solve call and its convergence behavior.
     # Iteration failures are deliberately not caught as optional export errors.
-    iterate(iter_count=iterations)
+    collect_window = (force_recording_window and force_context is not None
+        and force_context.get("status") == "configured"
+        and cfg.get("aero", {}).get("force_history", {}).get("require_stable", False))
+    with _defer_residual_stop(solver, collect_window) as recording_window:
+        iterate(iter_count=iterations)
     if temperature_context is not None:
         try:
             result["temperature_history"] = _finish_temperature_history(*temperature_context)
@@ -116,6 +153,10 @@ def iterate_with_histories(solver, cfg, wall_names, *, record_forces=True):
     if force_context is not None:
         from .force_history import finish_history
         result["force_history"] = finish_history(solver, cfg, force_context)
+        if collect_window:
+            result["force_history"]["recording_window"] = {
+                **recording_window, "requested_iteration_budget": iterations,
+                "residual_thresholds_unchanged": True}
     return result
 
 

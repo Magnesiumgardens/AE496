@@ -142,7 +142,8 @@ class ContinuationTests(unittest.TestCase):
             setup=SimpleNamespace(general=SimpleNamespace(solver=SimpleNamespace(time=SimpleNamespace(get_state=lambda:'steady')))),
             mesh=SimpleNamespace(quality=lambda:calls.append(('quality',))),
             solution=SimpleNamespace(controls=NativeControls(),methods=SimpleNamespace(spatial_discretization=SimpleNamespace(discretization_scheme=schemes)))))
-        def iterate(solver,cfg,walls):
+        def iterate(solver,cfg,walls,**kwargs):
+            self.assertTrue(kwargs["force_recording_window"])
             calls.append(('iterate',cfg['solver']['max_iterations']));return {'temperature_history': {'status':'disabled'}, 'force_history': {'status':'disabled'}}
         with patch('pipeline.continuation.launch_solver',return_value=solver),patch('pipeline.continuation.validate_saved_conditions'),patch('pipeline.continuation.iterate_with_histories',side_effect=iterate),patch('pipeline.continuation.configure_residual_criteria',return_value={'energy':1e-6}):
             summary=continue_solver(self.cfg,50,staged)

@@ -102,11 +102,13 @@ def continue_solver(cfg, iterations, output_dir):
         # Do not read_mesh, standard_initialize, hybrid_initialize, or overwrite
         # farfield/wall settings: retain the developed solution and residual scale.
         print(f"[continue] Continuing for up to {iterations} additional steady iterations; no initialization",flush=True)
-        summary.update(iterate_with_histories(solver,segment_cfg,summary["body_wall_zones"]))
+        summary.update(iterate_with_histories(solver,segment_cfg,summary["body_wall_zones"],
+                                            force_recording_window=True))
         solver.settings.file.write_case_data(file_name=str(output/"04_final.cas.h5"))
         source = source_hashes(output)
         for history in ("temperature_history", "force_history"):
-            if summary.get(history, {}).get("status") in ("complete", "partial"):
+            if (summary.get(history, {}).get("status") in ("complete", "partial")
+                    or (history == "force_history" and summary.get(history, {}).get("status") == "unavailable")):
                 summary[history]["source_sha256"] = source
         summary.pop("numerical_quality",None)
         if cfg["thermal"]["mode"] == "radiative_equilibrium":

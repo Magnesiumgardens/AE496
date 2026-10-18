@@ -220,51 +220,41 @@ def finish_history(solver, cfg, context):
                     native_frequency_iterations=1,
                     force_units="N/m of planar span",
                     method="Fluent native dimensional-force report file",
-                    iteration_counter="Fluent native report-file Iteration column and final report-compute metadata",
+                    iteration_counter="Fluent native report-file Iteration column",
                     interpretation="Steady CFD convergence versus actual Fluent iteration; not physical time.")
     try:
-        context["report"].active = False
-        rows = parse_report_file(raw_path, context["names"], metadata["report_depth_m"])
-        from .aero import report_iteration, report_scalar
+        if context.get("report") is not None:
+            context["report"].active = False
+        from .aero import report_scalar
         compute = solver.settings.solution.report_definitions.compute
-        final, counters = {}, []
+        final = {}
         for key, kind in zip(FORCE_COLUMNS, ("drag", "lift")):
             name = context["names"][kind]
             raw = compute(report_defs=[name])
             final[key] = report_scalar(raw, name) / metadata["report_depth_m"]
-            counters.append(report_iteration(raw, name))
-        counters_available = all(counter is not None for counter in counters)
-        if counters_available and counters[0] != counters[1]:
-            raise ValueError("Final drag/lift reports refer to different actual iterations")
+        # Compute() guarantees report values, not an iteration-counter schema.
+        # Integer list elements may be other native report metadata. Preserve
+        # the final dimensional values even if parsing a buffered file fails.
+        metadata["final_report_forces"] = final
+        rows = parse_report_file(raw_path, context["names"], metadata["report_depth_m"])
+        metadata["final_force_comparison"] = {key: {
+            "last_native_file_N_m": rows[-1][key], "final_report_N_m": final[key],
+            "absolute_difference_N_m": abs(final[key] - rows[-1][key])}
+            for key in FORCE_COLUMNS}
         matches_last = all(math.isclose(final[key], rows[-1][key], rel_tol=1e-6, abs_tol=1e-8)
                            for key in FORCE_COLUMNS)
-        if counters_available:
-            final["iteration"] = counters[0]
-            if final["iteration"] < rows[-1]["iteration"]:
-                raise ValueError("Native force history extends past the measured final iteration")
-            if final["iteration"] == rows[-1]["iteration"]:
-                if not matches_last:
-                    raise ValueError("Final native force-history sample differs from final force reports")
-            else:
-                rows.append(final)
-                rows = _validated_rows(rows)
-            verified = True
-            verification_method = "Native report-file iterations and final report-compute iteration metadata"
-        else:
-            # Some client versions omit report-compute iteration metadata. A
-            # frequency-one file still supplies measured iteration numbers.
-            # Verify its final recorded physical state against both final
-            # dimensional force reports; never replace its counter with a budget.
-            verified = matches_last and all(counter is None or counter == rows[-1]["iteration"]
-                                             for counter in counters)
-            verification_method = ("Frequency-one native history final forces matched to final report computation"
-                                   if verified else "Final force-history state could not be verified")
-        measured_final = counters[0] if counters_available else rows[-1]["iteration"] if verified else None
+        # The file records every iteration. Its actual index and force values
+        # are authoritative; never append a sample using Compute() metadata or
+        # an iteration budget. Both final forces must independently agree.
+        verified = matches_last
+        verification_method = ("Frequency-one native history final forces matched to final report computation"
+                               if verified else "Final native force-history sample differs from final force reports")
+        measured_final = rows[-1]["iteration"] if verified else None
         sampled = _sample_rows(rows, configured["sample_every_iterations"])
         csv_path = raw_path.with_name(CSV_NAME)
         atomic_csv(csv_path, sampled)
         stability = assess_force_stability(sampled, configured) if verified else dict(
-            status="not_verified", reason="Final computed forces do not verify the last frequency-one native history sample")
+            status="not_verified", reason=verification_method)
         metadata.update(status="complete" if verified else "partial", csv=csv_path.name,
                         csv_sha256=file_sha256(csv_path), raw_report_sha256=file_sha256(raw_path),
                         sample_count=len(sampled), native_sample_count=len(rows),
@@ -291,7 +281,10 @@ def read_saved_force_history(cfg):
         if not isinstance(metadata, dict):
             raise ValueError("Saved force-history metadata must be a mapping")
         if metadata.get("status") != "complete" or not metadata.get("final_iteration_verified"):
-            raise ValueError("No complete final-iteration-verified force history is available")
+            detail = metadata.get("error") or metadata.get("force_stability", {}).get("reason")
+            status = metadata.get("status", "missing")
+            raise ValueError(f"Force-history recording is {status}: " +
+                (str(detail) if detail else "No complete final-state-verified force history was recorded"))
         base = cfg.get("geometry", {}).get("body_wall_name", "body_wall")
         zones = metadata.get("body_wall_zones")
         if (not isinstance(zones, list) or not zones or len(set(zones)) != len(zones)
@@ -343,3 +336,80 @@ def assess_saved_force_history(cfg):
         return result
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return dict(status="not_verified", reason=str(exc))
+
+
+def force_history_diagnostics(cfg):
+    """Read the exact recording/provenance failure without starting Ansys."""
+    work = Path(cfg["project"]["work_dir"])
+    try:
+        summary = json.loads((work / "summary.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        summary = {}
+    metadata = summary.get("force_history", {})
+    result = dict(case=cfg["project"].get("name"), work_dir=str(work),
+                  force_stability=assess_saved_force_history(cfg),
+                  recording_status=metadata.get("status", "missing"),
+                  recording_error=metadata.get("error") or metadata.get("force_stability", {}).get("reason"),
+                  final_state_verification_method=metadata.get("final_state_verification_method"),
+                  sample_count=metadata.get("sample_count"),
+                  final_iteration=metadata.get("final_iteration"), files={})
+    result["final_force_comparison"] = metadata.get("final_force_comparison")
+    for name, field in ((CSV_NAME, "csv_sha256"), (RAW_NAME, "raw_report_sha256")):
+        path = work / name
+        info = dict(path=str(path), exists=path.is_file())
+        if path.is_file():
+            info["recorded_hash_matches"] = metadata.get(field) == file_sha256(path)
+            if name == RAW_NAME:
+                lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+                info.update(first_lines=lines[:12], last_lines=lines[-6:])
+        result["files"][name] = info
+    return result
+
+
+def recheck_saved_force_history(solver, cfg, wall_names):
+    """Reverify an existing recording against its saved checkpoint, without iterating.
+
+    An earlier adapter failure can leave a valid raw file. Recovery requires
+    the recorded raw hash, conditions and body walls, a matching CFD pair, and
+    independent final forces from the already loaded, validated native case.
+    Source mismatches cannot be repaired by relabeling old history.
+    """
+    current = assess_saved_force_history(cfg)
+    if current["status"] != "not_verified":
+        return current
+    work = Path(cfg["project"]["work_dir"])
+    summary_path = work / "summary.json"
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        previous = summary.get("force_history", {})
+        raw_path = work / RAW_NAME
+        source = {"final_case": file_sha256(work / "04_final.cas.h5"),
+                  "final_data": file_sha256(work / "04_final.dat.h5")}
+        binding = previous.get("source_sha256") or summary.get("numerical_quality", {}).get("source_sha256")
+        if (binding != source or previous.get("conditions") != temperature_conditions(cfg)
+                or previous.get("raw_report_file") != RAW_NAME
+                or previous.get("raw_report_sha256") != file_sha256(raw_path)
+                or previous.get("native_frequency_iterations") != 1
+                or previous.get("report_depth_m") != 1.0
+                or set(previous.get("body_wall_zones", [])) != set(wall_names)):
+            return current
+    except (OSError, ValueError, KeyError, TypeError):
+        return current
+    from .aero import configure_force_reports
+    names, state = configure_force_reports(solver, cfg, wall_names)
+    context = dict(settings=settings(cfg), raw_path=raw_path, report=None,
+                   names=names, reference_state=state, body_wall_zones=list(wall_names))
+    metadata = finish_history(solver, cfg, context)
+    metadata["source_sha256"] = source
+    metadata["rechecked_without_iterations"] = True
+    metadata["previous_verification"] = {
+        "status": previous.get("status"), "error": previous.get("error"),
+        "force_stability": previous.get("force_stability")}
+    # Retain the previous metadata before replacing only the derived history.
+    from datetime import datetime, timezone
+    from .utils import atomic_json
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    atomic_json(work / "solver_diagnostics" / ("force_history_before_recheck_" + stamp + ".json"), previous)
+    summary["force_history"] = metadata
+    atomic_json(summary_path, summary)
+    return assess_saved_force_history(cfg)

@@ -153,7 +153,7 @@ class ForceHistoryTests(unittest.TestCase):
             self.assertEqual(metadata["raw_report_sha256"], file_sha256(raw))
             self.assertEqual(metadata["conditions"], temperature_conditions(cfg))
 
-    def test_finish_can_append_independently_measured_final_without_using_iteration_budget(self):
+    def test_finish_never_appends_samples_from_undocumented_compute_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             cfg = config(work)
@@ -161,10 +161,16 @@ class ForceHistoryTests(unittest.TestCase):
             raw = work / RAW_NAME
             native_file(raw, rows([100.] * 100, start=1, step=1))
             metadata = finish_history(final_solver(103), cfg, context(cfg, raw))
-            self.assertEqual(metadata["final_iteration"], 103)
+            self.assertEqual(metadata["final_iteration"], 100)
             with (work / CSV_NAME).open() as handle:
                 recorded = list(csv.DictReader(handle))
-            self.assertEqual(int(recorded[-1]["iteration"]), 103)
+            self.assertEqual(int(recorded[-1]["iteration"]), 100)
+            self.assertEqual(metadata["native_sample_count"], 100)
+            for counter in (0, 1, 99999):
+                with self.subTest(compute_integer=counter):
+                    verified = finish_history(final_solver(counter), cfg, context(cfg, raw))
+                    self.assertEqual(verified["status"], "complete")
+                    self.assertEqual(verified["final_iteration"], 100)
 
     def test_native_counter_with_matching_final_forces_works_without_compute_counter(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -181,9 +187,25 @@ class ForceHistoryTests(unittest.TestCase):
             self.assertEqual(metadata["status"], "partial")
             self.assertEqual(metadata["force_stability"]["status"], "not_verified")
             metadata = finish_history(final_solver(125, drag=120.), cfg, context(cfg, raw))
-            self.assertEqual(metadata["status"], "unavailable")
-            self.assertIn("differs", metadata["error"])
+            self.assertEqual(metadata["status"], "partial")
+            self.assertIn("differs", metadata["force_stability"]["reason"])
             self.assertTrue(raw.is_file())
+
+    def test_two_user_samples_verify_the_state_but_cannot_pass_the_stability_window(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            cfg = config(work)
+            raw = work / RAW_NAME
+            raw.write_text('"nose-study-force-history"\n"Iteration" "nose-study-drag etc.."\n'
+                '("Iteration" "nose-study-drag" "nose-study-lift")\n'
+                '2649 330.3499266915852 -327.0710832079477\n'
+                '2650 330.348354062727 -327.079415710345\n')
+            solver = final_solver(0, drag=330.348354062727, lift=-327.079415710345)
+            metadata = finish_history(solver, cfg, context(cfg, raw))
+            self.assertEqual(metadata["status"], "complete")
+            self.assertEqual(metadata["final_iteration"], 2650)
+            self.assertEqual(metadata["native_sample_count"], 2)
+            self.assertEqual(metadata["force_stability"]["status"], "insufficient_history")
 
     def test_saved_history_checks_current_source_hashes_conditions_and_settings(self):
         with tempfile.TemporaryDirectory() as directory:

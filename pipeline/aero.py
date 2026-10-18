@@ -67,8 +67,8 @@ def reference_state(cfg):
 def report_scalar(raw, target):
     """Read one named report without mistaking iteration indices for forces.
 
-    Fluent 251 returns named [value, iteration] records; newer clients can
-    separate values and iteration metadata. Never search metadata for a value.
+    Fluent 251 returns named [value, integer metadata] records; clients can
+    also separate values and metadata. Never search metadata for a force.
     """
     values = raw[0] if isinstance(raw, (tuple, list)) else raw
     if not isinstance(values, dict) or target not in values:
@@ -87,11 +87,11 @@ def report_scalar(raw, target):
 
 
 def report_iteration(raw, target):
-    """Read a Fluent report's actual iteration metadata, or return ``None``.
+    """Legacy extraction of integer report metadata, or ``None``.
 
-    Both the observed 251 ``{name: [value, iteration]}`` records and clients'
-    separate ``(values, iterations)`` mappings are supported. A force value is
-    never used as an iteration counter.
+    This layout does not establish that the integer counts completed solver
+    iterations. Force-history verification uses the native file's labeled
+    iteration column instead; a force value is never used as a counter.
     """
     values = raw[0] if isinstance(raw, (tuple, list)) and raw else raw
     if not isinstance(values, dict) or target not in values:
@@ -429,11 +429,15 @@ def require_force_stability(cfg, result):
     if (cfg.get("aero", {}).get("enabled", True) and required
             and result.get("force_stability", {}).get("status") != "passed"):
         status = result.get("force_stability", {}).get("status", "not_verified")
+        reason = result.get("force_stability", {}).get("reason", "No failure detail was recorded")
+        case_arg = '"' + str(cfg.get("_config_path", "<case.yaml>")) + '"'
+        advice = (f"Use study.py continue --config {case_arg} --iterations 200 --stop-after aero "
+                  "to record additional iterations without reinitializing the flow."
+                  if status in ("failed", "insufficient_history") else
+                  f"Run study.py force-status --config {case_arg} to inspect the recording and verification details.")
         raise ValueError(
-            f"Drag force-stability screen is {status}; measured forces and the saved CFD pair are retained. "
-            "Use study.py continue --config <case.yaml> --iterations 200 --stop-after aero to record additional "
-            "iterations without reinitializing the flow, then export again. "
-            "Missing legacy histories cannot be reconstructed from a final force value.")
+            f"Drag force-stability screen is {status}: {reason}. "
+            f"Measured forces and the saved CFD pair are retained. {advice}")
     if (cfg.get("aero", {}).get("enabled", True) and required
             and result.get("residual_status") != "residual_screen_passed"):
         raise ValueError("The aerodynamic result also requires a matching passed residual screen; measured forces are retained")

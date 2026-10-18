@@ -34,11 +34,19 @@ def main():
     export = commands.add_parser("export", help="Export solved wall temperatures and forces from the selected CFD case")
     export.add_argument("--config", required=True)
     export.add_argument("--inspect-fields", action="store_true")
+    force_status = commands.add_parser("force-status", help="Read force-history recording and verification details without Ansys")
+    force_status.add_argument("--config", required=True)
     migrate = commands.add_parser("migrate", help="Back up and select the single radiative-equilibrium CFD workflow")
     migrate.add_argument("--config", required=True)
     migrate.add_argument("--thermal-config",help="Also back up and convert a separate Mechanical YAML")
     commands.add_parser("update", help="Fetch the study branch through Git and update with backups")
     args = parser.parse_args()
+    if args.command == "force-status":
+        import json
+        from pipeline.config import load_config
+        from pipeline.force_history import force_history_diagnostics
+        print(json.dumps(force_history_diagnostics(load_config(args.config)), indent=2))
+        return 0
     if args.command == "update":
         from update import main as update_main
         return update_main()
