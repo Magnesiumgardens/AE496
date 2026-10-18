@@ -104,6 +104,10 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                 result["aerodynamics"] = aerodynamic_summary(solver, cfg, walls)
                 result["aerodynamics"]["source_case"] = str(paths["final_case"])
                 result["aerodynamics"]["source_sha256"] = {key:file_sha256(paths[key]) for key in ("final_case","final_data")}
+                result["aerodynamics"]["residual_status"] = quality.get("status", "not_verified")
+                if (quality.get("status") == "residual_screen_passed"
+                        and result["aerodynamics"].get("force_stability", {}).get("status") == "passed"):
+                    result["aerodynamics"]["convergence_status"] = "residual_and_force_screens_passed"
                 destination = Path(cfg.get("_study_work_dir",paths["work"]))
                 atomic_json(destination / "aero_summary.json", result["aerodynamics"])
                 print("[export] Drag:", result["aerodynamics"]["drag_per_unit_span_N_m"], "N/m", flush=True)
@@ -111,6 +115,10 @@ def export_saved_case(cfg, thermal=True, aero=True, inspect=False):
                 atomic_json(Path(cfg.get("_study_work_dir",paths["work"])) / "aero_summary.json", {"status": "failed", "error": str(exc)})
                 print("[export] Aerodynamic export failed; completed temperature exports are retained.", flush=True)
                 raise
+            # Write the measured result first. A failed stability screen must
+            # not replace useful forces with a generic adapter-failure record.
+            from .aero import require_force_stability
+            require_force_stability(cfg, result["aerodynamics"])
         return result
     finally:
         solver.exit()

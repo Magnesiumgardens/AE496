@@ -92,6 +92,9 @@ def stage_fingerprint(stage, cfg, thermal_cfg, outputs):
     if "geometry" in values:
         values["geometry"].pop("input_file", None)
     if stage == "thermal":values["mechanical"] = thermal_cfg
+    if stage == "aero":
+        from .aero import MODEL_VERSION
+        values["export_model_version"] = MODEL_VERSION
     inputs = {"geometry": file_hash(cfg["geometry"]["input_file"])}
     aerodynamic = thermal_cfg.get("loading", {}).get("mode") == "aerodynamic_surface_load"
     if stage == "thermal" and not aerodynamic:
@@ -288,7 +291,9 @@ def _archive_stage(stage, work, cfg, state):
         candidates.extend([work / "01_labeled_geometry.pmdb", work / "geometry_summary.json"])
     if stage in ("mesh", "solver"):
         candidates.extend([work / "03_setup.cas.h5", work / "summary.json", work / "body_wall_heat_flux.csv",
-                           work / "solver_temperature_history.csv", work / "solver_temperature_history.out", work / "solver_diagnostics"])
+                           work / "solver_temperature_history.csv", work / "solver_temperature_history.out", work / "solver_diagnostics",
+                           work / "solver_force_history.csv", work / "solver_force_history.out"])
+    if "aero" in INVALIDATES[stage]:candidates.append(work / "aero_forces_drag.txt")
     if "temperature_export" in INVALIDATES[stage]:
         from .temperature_export import temperature_paths
         candidates.append(temperature_paths(cfg)[0].parent)
@@ -385,6 +390,9 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                 from .aerothermal_calibration import verify_surface_package
                 try:verify_surface_package(cfg)
                 except (ValueError, OSError, RuntimeError) as exc:raise BatchError(str(exc)) from exc
+            if stage == "aero":
+                from .gas_reporting import aero_complete_for_report
+                if not aero_complete_for_report(cfg):raise BatchError("Aerodynamic export is stale")
             valid_outputs = True
         except BatchError:
             valid_outputs = False
@@ -394,6 +402,10 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
                 quality = saved_quality(cfg)
                 if quality["status"] == "failed" or (single and quality["status"] != "residual_screen_passed"):valid_outputs = False
         if resume and valid_outputs and reusable(record, fingerprint, files[stage]):
+            if stage == "aero":
+                from .aero import require_force_stability
+                try:require_force_stability(cfg, read_json(files[stage][0]))
+                except ValueError as exc:raise BatchError(str(exc)) from exc
             print(f"[resume] {cfg['project']['name']}: {stage} unchanged")
             outcomes[stage] = "reused"
             continue
@@ -407,6 +419,10 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
             from .gas_reporting import temperature_complete
             can_adopt = temperature_complete(cfg)
         if can_adopt:
+            if stage == "aero":
+                from .aero import require_force_stability
+                try:require_force_stability(cfg, read_json(files[stage][0]))
+                except ValueError as exc:raise BatchError(str(exc)) from exc
             print(f"[resume] {cfg['project']['name']}: adopting existing {stage}; original provenance unverified")
             state["stages"][stage] = dict(status="complete", fingerprint=fingerprint,
                 output_sha256=output_hashes(files[stage]), provenance="adopted_unverified")
@@ -459,6 +475,9 @@ def run_case(config_path, thermal_config_path="thermal_analysis.yaml", resume=Tr
             if stage == "calibration":
                 from .aerothermal_calibration import verify_surface_package
                 verify_surface_package(cfg)
+            if stage == "aero":
+                from .aero import require_force_stability
+                require_force_stability(cfg, read_json(files[stage][0]))
         except Exception as exc:
             state["stages"][stage] = dict(status="failed", fingerprint=fingerprint, error=str(exc))
             _save_state(state_path, state)

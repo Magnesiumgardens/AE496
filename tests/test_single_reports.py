@@ -94,7 +94,7 @@ class SingleSolveReportTests(unittest.TestCase):
                 self.assertFalse((report/'adiabatic_wall_temperature_map.png').exists())
                 manifest=json.loads((report/'radiative_equilibrium_case_report.json').read_text())
                 self.assertIn('equilibrium',manifest['wall_boundary_condition'])
-                self.assertIn('prescribes',manifest['interpretation'])
+                self.assertIn('Separate Mechanical loading',manifest['interpretation'])
             self.assertFalse((root/'comparison/adiabatic_report.json').exists())
             manifest=json.loads((root/'comparison/radiative_equilibrium_report.json').read_text())
             self.assertTrue(manifest['comparable_conditions'])

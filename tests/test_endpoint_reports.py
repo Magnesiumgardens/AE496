@@ -78,7 +78,7 @@ def endpoint_case(work, flux_scale=1):
               (('final_case', '04_final.cas.h5'), ('final_data', '04_final.dat.h5'))}
     metadata.update(source_sha256=source, wall_csv_sha256=file_sha256(temperature_paths(gas_cfg)[0]))
     atomic_json(temperature_paths(gas_cfg)[1], metadata)
-    aero = aerodynamic_summary(fluent(), gas_cfg, ['body_wall.1', 'body_wall.2'])
+    aero = aerodynamic_summary(fluent(), source_cfg(cfg), ['body_wall.1', 'body_wall.2'])
     aero['source_sha256'] = source
     atomic_json(work / 'aero_summary.json', aero)
     build_convection_package(cfg)

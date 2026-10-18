@@ -16,9 +16,34 @@ THERMAL_METRIC_FIELDS = (
     "solid_area_m2", "solid_mass_per_unit_span_kg_m",
 )
 AERO_FIELDS = (
-    "drag_per_unit_span_N_m", "lift_per_unit_span_N_m", "Cd", "Cl", "L_over_D",
+    "drag_per_unit_span_N_m", "total_drag_per_unit_span_N_m",
+    "pressure_drag_per_unit_span_N_m", "viscous_drag_per_unit_span_N_m",
+    "lift_per_unit_span_N_m", "Cd", "Cd_pressure", "Cd_viscous", "Cl", "L_over_D",
     "dynamic_pressure_Pa", "reference_area_per_unit_span_m", "reference_length_m",
+    "component_status", "force_stability_status", "residual_status",
 )
+
+
+def aero_report_fields(aero):
+    """Flatten persisted force metrics without fabricating missing components."""
+    fields = {key: aero.get(key) for key in AERO_FIELDS}
+    stability = aero.get("force_stability", {})
+    fields["force_stability_status"] = (stability.get("status", "not_verified")
+        if isinstance(stability, dict) else "not_verified")
+    fields["component_status"] = aero.get("component_status", "unavailable")
+    fields["residual_status"] = aero.get("residual_status", "not_verified")
+    return fields
+
+
+def force_screening_eligible(row):
+    """A stable force history is required for a Pareto screening claim.
+
+    Passing this check alone does not establish residual convergence or mesh
+    independence. Unverified dimensional forces remain in exported tables.
+    """
+    return (row.get("force_stability_status") == "passed"
+            and (row.get("residual_status") == "residual_screen_passed"
+                 or row.get("convergence_status") == "residual_and_force_screens_passed"))
 
 
 def thermal_screening_metrics(xy, flux, history, settings, temperature_limit=None):
@@ -103,6 +128,12 @@ def aero_complete(case_dir, cfg):
     zones = result.get("body_wall_zones", [])
     if not zones or any(not (z == base or z.startswith(base + ".")) for z in zones):
         return False
+    # Availability is a reported scientific status, not cache freshness: an
+    # unchanged unavailable history may still accompany useful dimensional
+    # forces. Changed history/settings must, however, refresh that status.
+    from .force_history import assess_saved_force_history
+    if result.get("force_stability") != assess_saved_force_history(cfg):
+        return False
     try:
         saved = (directory / "aero_summary.json").stat().st_mtime_ns
         return all((directory / name).stat().st_mtime_ns <= saved
@@ -129,6 +160,7 @@ def pareto_cases(rows):
         except (ValueError, TypeError, KeyError):
             continue
         if (row.get("status") == "complete" and row.get("aero_status") == "complete"
+                and force_screening_eligible(row)
                 and math.isfinite(drag) and drag >= 0 and math.isfinite(temp)
                 and row.get("temperature_limit_status") != "exceeded"):
             candidates.append((row["case"], drag, temp))
@@ -151,11 +183,16 @@ def create_trade_outputs(runs_dir, rows, output_dir):
             for r in eligible}
     comparable = len(keys) <= 1
     frontier = pareto_cases(eligible) if comparable else []
+    unchecked = [dict(case=row["case"], force_stability_status=row.get(
+        "force_stability_status", "not_verified"), residual_status=row.get("residual_status", "not_verified"))
+        for row in eligible if not force_screening_eligible(row)]
     report = {
         "status": "screening_only" if comparable else "incomparable_conditions",
         "pareto_cases": frontier,
         "objectives": ["minimize drag per unit span", "minimize peak temperature"],
         "limits": "Only configured temperature limits are screened; no material limit is assumed.",
+        "force_screening_requirement": "Drag stability and residual screens must both pass; this is not proof of full CFD convergence or mesh independence.",
+        "cases_excluded_from_pareto_for_force_checks": unchecked,
         "limitations": [
             "No automatic best-nose selection; convergence and mesh independence remain unverified.",
             "Moments, stability, structural stress, material property variation and 3-D effects are not evaluated.",
@@ -180,7 +217,9 @@ def create_trade_outputs(runs_dir, rows, output_dir):
         fig, ax = plt.subplots(figsize=(max(7, 0.8 * len(valid)), 5))
         ax.bar([r["case"] for r, _ in valid], [v for _, v in valid])
         ax.set_ylabel(label)
-        ax.set_title("Nose trade screening — convergence not verified")
+        ax.set_title("Dimensional nose comparison — force checks shown below")
+        ax.set_xticks(range(len(valid)), [r["case"] + "\n[" + str(r.get(
+            "force_stability_status", "not_verified")) + "]" for r, _ in valid])
         ax.tick_params(axis="x", rotation=30)
         fig.tight_layout()
         p = output_dir / f"{key}_by_geometry.png"
@@ -198,12 +237,13 @@ def create_trade_outputs(runs_dir, rows, output_dir):
                     continue
                 if not math.isfinite(y):
                     continue
-                marker = "*" if row["case"] in frontier and ykey == "peak_temperature_K" else "o"
+                marker = "*" if row["case"] in frontier and ykey == "peak_temperature_K" else (
+                    "o" if force_screening_eligible(row) else "x")
                 ax.scatter(value, y, marker=marker, s=85)
                 ax.annotate(row["case"], (value, y), xytext=(4, 4), textcoords="offset points")
                 count += 1
             if count:
-                ax.set(xlabel=label, ylabel=ylabel, title="Screening trade (* = Pareto candidate)")
+                ax.set(xlabel=label, ylabel=ylabel, title="Screening trade (* = Pareto candidate; × = force checks unverified/failed)")
                 fig.tight_layout()
                 p = output_dir / f"{ykey}_vs_{key}.png"
                 fig.savefig(p, dpi=160)

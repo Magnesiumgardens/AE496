@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from .trade_study import AERO_FIELDS, THERMAL_METRIC_FIELDS, read_aero
+from .trade_study import AERO_FIELDS, THERMAL_METRIC_FIELDS, aero_report_fields, read_aero
 
 
 def load_yaml(path):
@@ -65,7 +65,7 @@ def build_result_row(geometry_file, case_name, case_dir, status, elapsed_s, erro
                coefficient_status=aero.get("coefficient_status", ""),
                convergence_status=aero.get("convergence_status", "not_verified"))
     if aero.get("status") == "complete":
-        row.update({key: aero.get(key) for key in AERO_FIELDS})
+        row.update(aero_report_fields(aero))
     config_path = case_dir / "_batch/config.yaml"
     if config_path.is_file():
         cfg = load_yaml(config_path)

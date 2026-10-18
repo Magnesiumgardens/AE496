@@ -285,7 +285,8 @@ def solve_case(cfg: dict, mesh_file: str | Path, *, reference_cfg: dict | None =
 
             print(f"[solve] Running up to {n} steady iterations...")
 
-            summary["temperature_history"] = _iterate_with_temperature_history(solver, cfg, wall_zones)
+            from .iteration_history import iterate_with_histories
+            summary.update(iterate_with_histories(solver, cfg, wall_zones))
 
         else:
             print(
@@ -301,9 +302,10 @@ def solve_case(cfg: dict, mesh_file: str | Path, *, reference_cfg: dict | None =
         if bool(cfg.get("outputs", {}).get("write_case_data", True)):
             print(f"[solve] Writing final case/data: {paths['final_case']}")
             solver.settings.file.write_case_data(file_name=str(paths["final_case"]))
-            if summary.get("temperature_history", {}).get("status") in ("complete", "partial"):
-                summary["temperature_history"]["source_sha256"] = {
-                    key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
+            for history in ("temperature_history", "force_history"):
+                if summary.get(history, {}).get("status") in ("complete", "partial"):
+                    summary[history]["source_sha256"] = {
+                        key: file_sha256(paths[key]) for key in ("final_case", "final_data")}
 
         if (ran_iterations and cfg["thermal"]["mode"] == "radiative_equilibrium"
                 and cfg.get("outputs", {}).get("compute_temperature_summary", True)):

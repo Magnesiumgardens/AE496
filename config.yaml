@@ -124,6 +124,14 @@ aero:
   reference_length_m: null
   ratio_of_specific_heats: 1.4
   gas_constant_j_kgk: 287.05
+  force_history:
+    enabled: true
+    sample_every_iterations: 25
+    recent_samples: 5
+    min_samples: 5
+    relative_tolerance: 0.01
+    absolute_drag_tolerance_N_m: 1.0e-6
+    require_stable: true
 
 reporting:
   # Geometric nose is +X in these profiles, independent of velocity direction.

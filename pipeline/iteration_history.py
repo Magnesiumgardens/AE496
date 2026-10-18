@@ -73,31 +73,52 @@ def parse_report_file(path):
     return rows
 
 
-def iterate_with_history(solver, cfg, wall_names):
+def _finish_temperature_history(raw_path, report):
+    report.active = False
+    rows = parse_report_file(raw_path)
+    path = raw_path.with_suffix(".csv")
+    atomic_csv(path, rows)
+    return dict(status="complete", csv=path.name, csv_sha256=file_sha256(path),
+                raw_report_file=raw_path.name, sample_count=len(rows),
+                method="Fluent native report file", iteration_counter="Fluent report-file Iteration column",
+                interpretation="Steady CFD convergence versus measured Fluent iteration; not physical time.")
+
+
+def iterate_with_histories(solver, cfg, wall_names, *, record_forces=True):
+    """Configure both monitors around one unchanged native steady iterate call."""
     iterations = int(cfg["solver"].get("max_iterations", 1200))
     iterate = solver.settings.solution.run_calculation.iterate
-    if not cfg["solver"].get("temperature_history", {}).get("enabled", True):
-        iterate(iter_count=iterations)
-        return {"status":"disabled"}
-    try:
-        raw_path, report = configure_history(solver, cfg, wall_names)
-    except Exception as exc:
-        print(f"[temperature-history] Native recording unavailable: {exc}; continuing the steady solve.", flush=True)
-        iterate(iter_count=iterations)
-        return {"status":"unavailable", "error":str(exc)}
-    print(f"[temperature-history] Recording measured iterations: {raw_path}", flush=True)
+    result = {"temperature_history": {"status": "disabled"}, "force_history": {"status": "disabled"}}
+    temperature_context, force_context = None, None
+    if record_forces:
+        from .force_history import configure_history as configure_forces
+        try:
+            force_context = configure_forces(solver, cfg, wall_names)
+        except Exception as exc:
+            result["force_history"] = {"status": "unavailable", "force_stability": {"status": "not_verified", "reason": str(exc)}}
+            print(f"[force-history] Native recording unavailable: {exc}; preserving the steady solve.", flush=True)
+    if cfg["solver"].get("temperature_history", {}).get("enabled", True):
+        try:
+            temperature_context = configure_history(solver, cfg, wall_names)
+            print(f"[temperature-history] Recording measured iterations: {temperature_context[0]}", flush=True)
+        except Exception as exc:
+            result["temperature_history"] = {"status": "unavailable", "error": str(exc)}
+            print(f"[temperature-history] Native recording unavailable: {exc}; continuing the steady solve.", flush=True)
     # Keep Fluent's original single solve call and its convergence behavior.
     # Iteration failures are deliberately not caught as optional export errors.
     iterate(iter_count=iterations)
-    try:
-        report.active = False
-        rows = parse_report_file(raw_path)
-        path = raw_path.with_suffix(".csv")
-        atomic_csv(path, rows)
-        return dict(status="complete", csv=path.name, csv_sha256=file_sha256(path),
-                    raw_report_file=raw_path.name, sample_count=len(rows),
-                    method="Fluent native report file", iteration_counter="Fluent report-file Iteration column",
-                    interpretation="Steady CFD convergence versus measured Fluent iteration; not physical time.")
-    except Exception as exc:
-        print(f"[temperature-history] Could not convert native history: {exc}; preserving the CFD solution.", flush=True)
-        return {"status":"unavailable", "raw_report_file":raw_path.name, "error":str(exc)}
+    if temperature_context is not None:
+        try:
+            result["temperature_history"] = _finish_temperature_history(*temperature_context)
+        except Exception as exc:
+            print(f"[temperature-history] Could not convert native history: {exc}; preserving the CFD solution.", flush=True)
+            result["temperature_history"] = {"status": "unavailable", "raw_report_file": temperature_context[0].name, "error": str(exc)}
+    if force_context is not None:
+        from .force_history import finish_history
+        result["force_history"] = finish_history(solver, cfg, force_context)
+    return result
+
+
+def iterate_with_history(solver, cfg, wall_names):
+    """Compatibility entry point for temperature-only history consumers."""
+    return iterate_with_histories(solver, cfg, wall_names, record_forces=False)["temperature_history"]

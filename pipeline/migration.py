@@ -196,6 +196,9 @@ def single_solve_config(cfg):
     outputs["write_case_data"] = True
     outputs.pop("export_custom_heat_flux", None)
     outputs.pop("compute_temperature_summary", None)
+    from .force_history import DEFAULTS as force_history_defaults
+    aero = cfg.setdefault("aero", {})
+    aero["force_history"] = _with_defaults(aero.get("force_history", {}), force_history_defaults)
     return cfg
 
 
@@ -207,10 +210,15 @@ def single_solve_state(state, old_cfg=None, new_cfg=None):
     unchanged_primary = (old_cfg is not None and new_cfg is not None
         and old_cfg.get("workflow", {}).get("strategy") == "single_solve"
         and all(old_cfg.get(key) == new_cfg.get(key) for key in
-                ("geometry", "mesh", "flight", "physics", "thermal", "solver", "temperature_export", "aero", "outputs")))
-    names = {"calibration", "thermal"} if unchanged_primary else (set(stages) - {"mesh"}) | {"solver", "temperature_export", "aero", "calibration", "thermal"}
+                ("geometry", "mesh", "flight", "physics", "thermal", "solver", "temperature_export", "outputs")))
+    if unchanged_primary:
+        names = set()
+        if old_cfg.get("calibration") != new_cfg.get("calibration"):names.update(("calibration", "thermal"))
+        if old_cfg.get("aero") != new_cfg.get("aero"):names.add("aero")
+    else:
+        names = (set(stages) - {"mesh"}) | {"solver", "temperature_export", "aero", "calibration", "thermal"}
     for stage in names:
-        stages[stage] = dict(status="stale", reason="Surface load calibration changed" if unchanged_primary else "Radiative-equilibrium CFD configuration changed")
+        stages[stage] = dict(status="stale", reason="Calibration or aerodynamic reporting configuration changed" if unchanged_primary else "Radiative-equilibrium CFD configuration changed")
     return state
 
 

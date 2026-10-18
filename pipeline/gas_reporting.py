@@ -9,7 +9,8 @@ import yaml
 from .aero import MODEL_VERSION as AERO_MODEL_VERSION, reference_state
 from .reporting import load_yaml, read_csv, read_json, write_csv
 from .temperature_export import temperature_paths, temperature_conditions
-from .trade_study import aero_complete, comparison_key, read_aero
+from .trade_study import (aero_complete, aero_report_fields, comparison_key,
+                          force_screening_eligible, read_aero)
 from .utils import file_sha256
 
 
@@ -25,6 +26,7 @@ CASE_ARTIFACTS = (
     "cold_wall_heat_flux_profile.png", "cold_wall_heat_flux_map.png",
     "radiative_equilibrium_wall_boundary.png", "radiative_equilibrium_wall_temperature_map.png",
     "radiative_equilibrium_case_report.json",
+    "force_iteration_history.csv", "force_iteration_history.png", "force_iteration_report.json",
 )
 COMPARISON_ARTIFACTS = (
     "adiabatic_temperature_summary.csv", "adiabatic_temperature_profiles.csv",
@@ -37,6 +39,8 @@ COMPARISON_ARTIFACTS = (
     "radiative_equilibrium_temperature_summary.csv", "radiative_equilibrium_temperature_profiles.csv",
     "radiative_equilibrium_report.json", "drag_vs_wall_temperature.png",
     "temperature_summary.csv", "temperature_profiles.csv", "steady_temperature_report.json",
+    "force_iteration_history_comparison.csv", "force_iteration_history_comparison.png",
+    "aerodynamic_comparison.csv", "drag_components_comparison.png",
 )
 
 
@@ -49,7 +53,7 @@ def _labels(mode):
         return dict(wall="Radiative-equilibrium wall temperature", model="steady_radiative_equilibrium_planar_CFD",
                     short="radiative_equilibrium", title="steady radiative-equilibrium CFD",
                     boundary="Gas-to-wall heat transfer balances external radiation; equilibrium wall temperature is solved.",
-                    interpretation="Equilibrium surface temperature and separate fluid-side static samples. Mechanical prescribes the surface temperature; it does not predict its warm-up.")
+                    interpretation="Equilibrium surface temperature and separate fluid-side static samples. Separate Mechanical loading determines the transient solid response; this steady CFD field has no physical-time solid history.")
     return dict(wall="Adiabatic wall / recovery temperature", model="steady_adiabatic_planar_CFD",
                 short="adiabatic", title="steady adiabatic CFD",
                 boundary="q_wall = 0; no radiation or imposed wall temperature",
@@ -114,6 +118,9 @@ def aero_complete_for_report(cfg):
     base = cfg["geometry"].get("body_wall_name", "body_wall")
     zones = result.get("body_wall_zones", [])
     if not zones or any(zone != base and not zone.startswith(base + ".") for zone in zones):
+        return False
+    from .force_history import assess_saved_force_history
+    if result.get("force_stability") != assess_saved_force_history(source_cfg(cfg)):
         return False
     try:
         source = source_work(cfg)
@@ -196,9 +203,7 @@ def build_gas_row(cfg, status="complete", elapsed_s=0, error=""):
         mean_wall_temperature_K=metric("wall_temperature", "length_weighted_mean_K"),
         maximum_near_wall_fluid_temperature_K=metric("near_wall_fluid_temperature", "maximum_K"),
         mean_near_wall_fluid_temperature_K=metric("near_wall_fluid_temperature", "length_weighted_mean_K"),
-        drag_per_unit_span_N_m=aero.get("drag_per_unit_span_N_m") if fresh_aero else None,
-        lift_per_unit_span_N_m=aero.get("lift_per_unit_span_N_m") if fresh_aero else None,
-        Cd=aero.get("Cd") if fresh_aero else None, Cl=aero.get("Cl") if fresh_aero else None,
+        **aero_report_fields(aero if fresh_aero else {}),
         convergence_status="failed" if status == "unconverged" else (aero.get("convergence_status", "not_verified") if fresh_aero else "not_verified"))
 
 
@@ -312,6 +317,93 @@ def _read_history(work, temperature_summary, warnings, case):
     except (OSError, ValueError, KeyError, TypeError) as exc:
         warnings.append(f"{case}: temperature convergence figure unavailable ({exc})")
         return []
+
+
+def _read_force_history(cfg, warnings, case):
+    """Return source-verified native-iteration totals, never physical time."""
+    from .force_history import read_saved_force_history
+    try:
+        history, _ = read_saved_force_history(source_cfg(cfg))
+        if len(history) < 2:
+            raise ValueError("Fewer than two native iteration samples")
+        return history
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        warnings.append(f"{case}: force iteration history unavailable ({exc})")
+        return []
+
+
+def _force_case_report(case, plt):
+    """Write force diagnostics even when no temperature figure can be made."""
+    name, work, rows, row = case["name"], case["work"], case["history"], case["row"]
+    directory = work / "reports"
+    directory.mkdir(parents=True, exist_ok=True)
+    files = {}
+    if rows:
+        files["force_iteration_history_csv"] = str(write_csv(directory / "force_iteration_history.csv", rows))
+        fig, ax = plt.subplots(figsize=(9, 5))
+        for column, label in (("drag_per_unit_span_N_m", "Drag"), ("lift_per_unit_span_N_m", "Lift")):
+            ax.plot([sample["iteration"] for sample in rows],
+                    [float(sample[column]) for sample in rows], label=label)
+        ax.set(xlabel="Native Fluent iteration (no physical time)", ylabel="Total force per unit span [N/m]",
+               title=name + " — whole-body forces; stability: " + row["force_stability_status"])
+        ax.legend()
+        ax.grid(alpha=.3)
+        files["force_iteration_history"] = _save(fig, directory / "force_iteration_history.png", plt)
+    metadata = dict(case=name, model="steady_planar_whole_body_forces", files=files,
+                    force_stability_status=row["force_stability_status"],
+                    component_status=row["component_status"],
+                    force_history_samples=len(rows),
+                    interpretation="Signed drag and lift projected in the configured freestream basis; native CFD iterations are not physical time.",
+                    limitation="Force stability alone does not establish residual convergence, mesh independence, or whole-vehicle performance.")
+    path = directory / "force_iteration_report.json"
+    path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    files["force_iteration_report"] = str(path)
+    return files
+
+
+def _force_comparison(cases, rows, output_dir, comparable, plt):
+    """Retain all dimensional records, with checks visible alongside them."""
+    columns = ["case", "status", "aero_status", *aero_report_fields({}), "convergence_status"]
+    records = [{column: row.get(column) for column in columns} for row in rows]
+    files = {"aerodynamic_comparison_csv": str(write_csv(output_dir / "aerodynamic_comparison.csv", records,
+                                                         fields=columns))}
+    history = [dict(case=case["name"], force_stability_status=case["row"]["force_stability_status"], **sample)
+               for case in cases for sample in case["history"]]
+    fields = ["case", "force_stability_status", "iteration", "drag_per_unit_span_N_m", "lift_per_unit_span_N_m"]
+    files["force_iteration_history_comparison_csv"] = str(write_csv(
+        output_dir / "force_iteration_history_comparison.csv", history, fields=fields))
+    with_history = [case for case in cases if case["history"]]
+    if comparable and with_history:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        for case in with_history:
+            samples = case["history"]
+            label = case["name"] + " [" + case["row"]["force_stability_status"] + "]"
+            line, = ax.plot([sample["iteration"] for sample in samples],
+                            [float(sample["drag_per_unit_span_N_m"]) for sample in samples], label=label + " drag")
+            ax.plot([sample["iteration"] for sample in samples],
+                    [float(sample["lift_per_unit_span_N_m"]) for sample in samples], linestyle="--",
+                    color=line.get_color(), label=label + " lift")
+        ax.set(xlabel="Native Fluent iteration (no physical time)", ylabel="Total force per unit span [N/m]",
+               title="Whole-body force convergence (solid = drag; dashed = lift)")
+        ax.legend()
+        ax.grid(alpha=.3)
+        files["force_iteration_history_comparison"] = _save(
+            fig, output_dir / "force_iteration_history_comparison.png", plt)
+    complete = [row for row in rows if row.get("aero_status") == "complete"
+                and row.get("component_status") == "complete"]
+    if comparable and complete:
+        fig, ax = plt.subplots(figsize=(max(8, len(complete) * 1.2), 5))
+        indices = np.arange(len(complete))
+        for offset, (column, label) in enumerate((("drag_per_unit_span_N_m", "Total"),
+                ("pressure_drag_per_unit_span_N_m", "Pressure"), ("viscous_drag_per_unit_span_N_m", "Viscous"))):
+            ax.bar(indices + (offset - 1) * .25, [row[column] for row in complete], width=.25, label=label)
+        ax.set_xticks(indices, [row["case"] + "\n[" + row["force_stability_status"] + "]" for row in complete],
+                      rotation=25, ha="right")
+        ax.set(ylabel="Sectional drag [N/m]", title="Whole-body drag components — force stability shown per case")
+        ax.legend()
+        ax.grid(axis="y", alpha=.3)
+        files["drag_components_comparison"] = _save(fig, output_dir / "drag_components_comparison.png", plt)
+    return files
 
 
 def _read_convection(cfg, warnings, case):
@@ -476,6 +568,7 @@ def create_gas_reports(runs_dir, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     _clear_generated(output_dir, COMPARISON_ARTIFACTS)
     rows, cases, conditions, warnings = [], [], set(), []
+    force_cases, force_conditions = [], set()
     for work in sorted(runs_dir.iterdir()) if runs_dir.is_dir() else []:
         if not work.is_dir():
             continue
@@ -492,6 +585,11 @@ def create_gas_reports(runs_dir, output_dir):
             cfg["project"].setdefault("name", work.name)
             row = build_gas_row(cfg)
             rows.append(row)
+            if row["aero_status"] == "complete":
+                force_cases.append(dict(name=cfg["project"]["name"], work=work, row=row,
+                    history=_read_force_history(cfg, warnings, work.name)))
+                force_conditions.add(comparison_key(reference_state(report_cfg(cfg)),
+                    json.dumps(cfg.get("mesh", {}), sort_keys=True)))
             if row["status"] in ("failed","unconverged"):
                 warnings.append(f"{work.name}: {row['error']}")
                 continue
@@ -532,11 +630,11 @@ def create_gas_reports(runs_dir, output_dir):
     profiles = [row for case in cases for row in case["values"]]
     common_ranges = {column: _temperature_range(profiles, column) for column in (
         "wall_temperature_K", "near_wall_fluid_temperature_K")} if profiles and comparable else {}
-    case_outputs = {}
+    case_outputs = {case["name"]: _force_case_report(case, plt) for case in force_cases}
     for case in cases:
         limits = common_ranges or {column: _temperature_range(case["values"], column) for column in (
             "wall_temperature_K", "near_wall_fluid_temperature_K")}
-        case_outputs[case["cfg"]["project"]["name"]] = _case_figures(case, limits, plt)
+        case_outputs.setdefault(case["cfg"]["project"]["name"], {}).update(_case_figures(case, limits, plt))
     modes = {row.get("thermal_mode") for row in rows}
     labels = _labels("radiative_equilibrium" if "radiative_equilibrium" in modes else "adiabatic")
     mixed = len(modes) > 1
@@ -546,6 +644,7 @@ def create_gas_reports(runs_dir, output_dir):
         fields=list(dict.fromkeys(key for row in rows for key in row)) if rows else ["case", "status", "thermal_mode"]))}
     created["temperature_profiles"] = str(write_csv(output_dir / profiles_name, profiles,
         fields=list(profiles[0]) if profiles else ["design", "s_norm", "wall_temperature_K", "near_wall_fluid_temperature_K"]))
+    created.update(_force_comparison(force_cases, rows, output_dir, len(force_conditions) <= 1, plt))
     if comparable and profiles:
         with_convection = [case for case in cases if case["convection"]]
         if with_convection:
@@ -609,8 +708,10 @@ def create_gas_reports(runs_dir, output_dir):
             fig, ax = plt.subplots(figsize=(8, 5))
             metric = "maximum_wall_temperature_K" if "radiative_equilibrium" in modes else "maximum_near_wall_fluid_temperature_K"
             for row in complete:
-                ax.scatter(row["drag_per_unit_span_N_m"], row[metric])
-                ax.annotate(row["case"], (row["drag_per_unit_span_N_m"], row[metric]))
+                ax.scatter(row["drag_per_unit_span_N_m"], row[metric],
+                           marker="o" if force_screening_eligible(row) else "x")
+                ax.annotate(row["case"] + " [" + row["force_stability_status"] + "]",
+                            (row["drag_per_unit_span_N_m"], row[metric]))
             ax.set(xlabel="Sectional drag [N/m]", ylabel="Maximum wall temperature [K]" if "radiative_equilibrium" in modes else "Maximum fluid-side surface temperature [K]",
                    title=labels["wall"] + " and drag comparison")
             ax.grid(alpha=0.3)
@@ -623,6 +724,8 @@ def create_gas_reports(runs_dir, output_dir):
         sampling="Wall and fluid-side values use wall-face coordinates; fluid-side samples are not a specified offset distance.",
         spatial_method="Colored samples only; no invented temperature interpolation across the solid interior.",
         history="No physical-time history exists in steady CFD. Optional convergence curves use Fluent iterations. Mechanical supplies separate physical-time solid results; historical figures require --reference-dir.",
+        force_history="Total whole-body drag/lift use native Fluent iterations, not physical time. Records with failed or unverified stability are retained and labelled; they are not validated design claims.",
+        force_comparable_conditions=len(force_conditions) <= 1,
         convergence="Assess residuals, force/temperature stability and mesh sensitivity before CDR conclusions.")
     if mixed:
         manifest.update(model="mixed_steady_planar_CFD",

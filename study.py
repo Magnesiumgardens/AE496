@@ -23,6 +23,8 @@ def main():
     continuation.add_argument("--courant", type=float, help="Set and save a new Courant number for this case")
     continuation.add_argument("--endpoint",choices=("cold_wall","adiabatic"),default="cold_wall")
     continuation.add_argument("--thermal-config",default="thermal_analysis.yaml")
+    continuation.add_argument("--stop-after", choices=("aero", "thermal"),
+                              help="Finish CFD exports without rebuilding the thermal study when set to aero")
     batch = commands.add_parser("batch", help="Run all configured nose geometries sequentially")
     batch.add_argument("--batch-config", default="batch.yaml")
     report = commands.add_parser("report", help="Regenerate per-case and comparison outputs without Ansys")
@@ -74,7 +76,7 @@ def main():
             print(f"[continue] {result.get("message", "Not converged yet; downstream analysis remains blocked")}. Diagnostics: {result["diagnostics"]}")
             return 2
         from pipeline.study import run_case
-        run_case(args.config,args.thermal_config)
+        run_case(args.config,args.thermal_config,stop_after=args.stop_after)
         from compare_nose_trade import compare
         from pathlib import Path
         work = Path(result["work_dir"])

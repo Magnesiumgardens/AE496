@@ -15,6 +15,9 @@ from scripts.update_project import update_project
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FORCE_HISTORY_DEFAULTS = dict(enabled=True, sample_every_iterations=25,
+    recent_samples=5, min_samples=5, relative_tolerance=.01,
+    absolute_drag_tolerance_N_m=1e-6, require_stable=True)
 
 
 def template():
@@ -31,6 +34,13 @@ def previous_single_template():
     cfg["solver"].update(initialization="hybrid", courant_number=None,
                          flow_scheme=None, max_iterations=1200)
     return cfg
+
+
+def expected_aero(previous):
+    """Monitoring defaults augment aerodynamic inputs without choosing a width."""
+    result = copy.deepcopy(previous)
+    result["force_history"] = {**FORCE_HISTORY_DEFAULTS, **result.get("force_history", {})}
+    return result
 
 
 class SingleConfigurationTests(unittest.TestCase):
@@ -50,6 +60,8 @@ class SingleConfigurationTests(unittest.TestCase):
         self.assertTrue(cfg["calibration"]["enabled"])
         self.assertEqual(cfg["calibration"]["cold_wall_temperature_k"], 300)
         self.assertEqual(cfg["calibration"]["heat_flux_into_wall_sign"], -1)
+        self.assertEqual(cfg["aero"]["force_history"], FORCE_HISTORY_DEFAULTS)
+        self.assertIsNone(cfg["aero"]["reference_area_per_unit_span_m"])
         thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
         self.assertEqual(thermal["loading"], {"mode": "aerodynamic_surface_load"})
         self.assertTrue(thermal["include_radiation"])
@@ -83,8 +95,9 @@ class SingleConfigurationTests(unittest.TestCase):
         before = copy.deepcopy(cfg)
         result = single_solve_config(cfg)
         self.assertEqual(cfg, before)
-        for name in ("solver", "geometry", "flight", "mesh", "runtime", "physics", "aero", "reporting", "project"):
+        for name in ("solver", "geometry", "flight", "mesh", "runtime", "physics", "reporting", "project"):
             self.assertEqual(result[name], before[name])
+        self.assertEqual(result["aero"], expected_aero(before["aero"]))
         self.assertEqual(result["workflow"], {"strategy": "single_solve"})
         self.assertNotIn("thermal_export", result)
         self.assertEqual(single_solve_config(result), result)
@@ -113,8 +126,9 @@ class SingleConfigurationTests(unittest.TestCase):
                 self.assertEqual(result["solver"]["courant_number"], .3)
                 self.assertEqual(result["solver"]["flow_scheme"], "first-order-upwind")
                 self.assertEqual(result["solver"]["max_iterations"], 4800)
-                for name in ("geometry", "mesh", "flight", "runtime", "physics", "aero"):
+                for name in ("geometry", "mesh", "flight", "runtime", "physics"):
                     self.assertEqual(result[name], before[name])
+                self.assertEqual(result["aero"], expected_aero(before["aero"]))
                 if before["thermal"]["mode"] == "radiative_equilibrium":
                     self.assertEqual(result["thermal"], before["thermal"])
                 self.assertEqual(single_solve_config(result), result)
@@ -212,7 +226,7 @@ class SingleConfigurationTests(unittest.TestCase):
         self.assertNotIn("radiation_temperature_k", migrated)
         self.assertEqual(single_solve_thermal_config(migrated), migrated)
 
-    def test_adding_calibration_preserves_current_re_primary_stage_records(self):
+    def test_adding_calibration_and_force_monitor_preserves_current_re_primary_stage_records(self):
         old = yaml.safe_load((ROOT / "tests/fixtures/prescribed_reference/config.yaml").read_text())
         migrated = single_solve_config(old)
         self.assertTrue(migrated["calibration"]["enabled"])
@@ -223,10 +237,41 @@ class SingleConfigurationTests(unittest.TestCase):
         before = copy.deepcopy(state)
         result = single_solve_state(state, old, migrated)
         self.assertEqual(state, before)
-        for name in ("mesh", "solver", "temperature_export", "aero"):
+        for name in ("mesh", "solver", "temperature_export"):
             self.assertEqual(result["stages"][name], records[name])
-        for name in ("calibration", "thermal"):
+        for name in ("aero", "calibration", "thermal"):
             self.assertEqual(result["stages"][name]["status"], "stale")
+        self.assertEqual(single_solve_config(migrated), migrated)
+
+    def test_force_monitor_only_migration_preserves_all_thermal_and_primary_cfd_records(self):
+        old = template()
+        old["aero"].pop("force_history", None)
+        old["calibration"]["cold_wall_temperature_k"] = 325.
+        before = copy.deepcopy(old)
+        migrated = single_solve_config(old)
+        self.assertEqual(old, before)
+        for name in ("geometry", "mesh", "flight", "physics", "thermal", "solver", "calibration"):
+            self.assertEqual(migrated[name], old[name])
+        self.assertEqual(migrated["aero"], expected_aero(old["aero"]))
+        self.assertIsNone(migrated["aero"]["reference_area_per_unit_span_m"])
+        records = {name: dict(status="complete", fingerprint=f"{name}-fingerprint",
+                             output_sha256={f"{name}-output": f"{name}-sha"})
+                   for name in ("mesh", "solver", "temperature_export", "aero", "calibration", "thermal")}
+        state = dict(version=4, strategy="single_solve", stages=records)
+        migrated_state = single_solve_state(state, old, migrated)
+        for name in ("mesh", "solver", "temperature_export", "calibration", "thermal"):
+            self.assertEqual(migrated_state["stages"][name], records[name])
+        self.assertEqual(migrated_state["stages"]["aero"]["status"], "stale")
+        self.assertEqual(state["stages"]["aero"]["status"], "complete")
+
+    def test_monitor_migration_keeps_explicit_sampling_and_stability_overrides(self):
+        old = template()
+        old["aero"]["force_history"] = dict(enabled=True, sample_every_iterations=10,
+            recent_samples=8, min_samples=10, relative_tolerance=.005,
+            absolute_drag_tolerance_N_m=1e-5, require_stable=False)
+        migrated = single_solve_config(old)
+        self.assertEqual(migrated["aero"], old["aero"])
+        self.assertIsNone(migrated["aero"]["reference_area_per_unit_span_m"])
         self.assertEqual(single_solve_config(migrated), migrated)
 
     def test_changed_re_wall_or_solver_still_invalidates_primary_stage_records(self):
@@ -281,6 +326,55 @@ class SingleConfigurationTests(unittest.TestCase):
 
 
 class SingleInstallerTests(unittest.TestCase):
+    def test_monitor_only_git_update_retains_thermal_settings_and_results_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "source", Path(directory) / "target"
+            source.mkdir(); target.mkdir()
+            for name in ("config.yaml", "thermal_analysis.yaml", "batch.yaml"):
+                (source / name).write_bytes((ROOT / name).read_bytes())
+            (source / "study.py").write_text("# current source fixture\n")
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "-c", "user.name=Force Monitor Test",
+                "-c", "user.email=monitor@example.invalid", "commit", "-qm", "fixture"], check=True)
+            (target / "study.py").write_text("# previous source\n")
+            previous = template(); previous["aero"].pop("force_history", None)
+            previous["calibration"]["cold_wall_temperature_k"] = 325.
+            case = target / "runs/blunt_1"; (case / "_batch").mkdir(parents=True)
+            for path in (target / "config.yaml", case / "_batch/config.yaml"):
+                path.write_text(yaml.safe_dump(previous))
+            thermal = yaml.safe_load((ROOT / "thermal_analysis.yaml").read_text())
+            thermal["transient"]["duration_s"] = 400
+            thermal["material"]["conductivity_w_mk"] = 145
+            # Exact bytes ensure this aero update does not rewrite the load model,
+            # material table, exposure or a user-reviewed comment.
+            thermal_bytes = ("# User-reviewed thermal settings\n" + yaml.safe_dump(thermal)).encode()
+            (target / "thermal_analysis.yaml").write_bytes(thermal_bytes)
+            records = {name: dict(status="complete", fingerprint=f"{name}-fingerprint")
+                for name in ("mesh", "solver", "temperature_export", "aero", "calibration", "thermal")}
+            state_path = case / "_batch/stage_state.json"
+            state_path.write_text(json.dumps(dict(version=4, strategy="single_solve", stages=records)))
+            artifacts = {name: ("existing " + name).encode() for name in (
+                "02_mesh.msh.h5", "04_final.cas.h5", "04_final.dat.h5", "aero_summary.json",
+                "cfd/cold_calibration/04_final.dat.h5", "thermal_bc/surface_load_nodes.csv",
+                "thermal_analysis/wall_temperature_history.csv")}
+            for name, data in artifacts.items():
+                path = case / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+
+            update_project(target, source)
+
+            self.assertEqual((target / "thermal_analysis.yaml").read_bytes(), thermal_bytes)
+            installed = yaml.safe_load((case / "_batch/config.yaml").read_bytes())
+            self.assertEqual(installed["aero"]["force_history"], FORCE_HISTORY_DEFAULTS)
+            self.assertIsNone(installed["aero"]["reference_area_per_unit_span_m"])
+            for name in ("thermal", "solver", "calibration", "mesh", "flight", "geometry"):
+                self.assertEqual(installed[name], previous[name])
+            state = json.loads(state_path.read_text())
+            for name in ("mesh", "solver", "temperature_export", "calibration", "thermal"):
+                self.assertEqual(state["stages"][name], records[name])
+            self.assertEqual(state["stages"]["aero"]["status"], "stale")
+            for name, data in artifacts.items(): self.assertEqual((case / name).read_bytes(), data)
+
     def test_git_installer_adds_calibration_without_reclassifying_current_re_results(self):
         with tempfile.TemporaryDirectory() as directory:
             source, target = Path(directory) / "source", Path(directory) / "target"
@@ -319,11 +413,13 @@ class SingleInstallerTests(unittest.TestCase):
 
             installed = yaml.safe_load((case / "_batch/config.yaml").read_bytes())
             self.assertTrue(installed["calibration"]["enabled"])
-            for name in ("geometry", "mesh", "flight", "physics", "thermal", "solver", "aero"):
+            for name in ("geometry", "mesh", "flight", "physics", "thermal", "solver"):
                 self.assertEqual(installed[name], old[name])
+            self.assertEqual(installed["aero"], expected_aero(old["aero"]))
             state = json.loads(state_path.read_text())
-            for name in ("mesh", "solver", "temperature_export", "aero"):
+            for name in ("mesh", "solver", "temperature_export"):
                 self.assertEqual(state["stages"][name], records[name])
+            self.assertEqual(state["stages"]["aero"]["status"], "stale")
             self.assertEqual(state["stages"]["calibration"]["status"], "stale")
             self.assertEqual(state["stages"]["thermal"]["status"], "stale")
             installed_thermal = yaml.safe_load((target / "thermal_analysis.yaml").read_bytes())
@@ -372,8 +468,9 @@ class SingleInstallerTests(unittest.TestCase):
                 self.assertEqual(installed["solver"]["courant_number"], .3)
                 self.assertEqual(installed["solver"]["flow_scheme"], "first-order-upwind")
                 self.assertEqual(installed["solver"]["max_iterations"], 4800)
-                for name in ("geometry", "mesh", "flight", "runtime", "physics", "thermal", "aero"):
+                for name in ("geometry", "mesh", "flight", "runtime", "physics", "thermal"):
                     self.assertEqual(installed[name], cfg[name])
+                self.assertEqual(installed["aero"], expected_aero(cfg["aero"]))
                 self.assertEqual((backup / path.relative_to(target)).read_bytes(), old_bytes)
             state = json.loads((case / "_batch/stage_state.json").read_text())
             self.assertEqual(state["stages"]["mesh"], mesh_record)

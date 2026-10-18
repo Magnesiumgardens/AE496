@@ -30,6 +30,7 @@ def config(work):
     # These regressions exercise the earlier direct-adiabatic path explicitly;
     # the application template now selects one radiative-equilibrium solve.
     cfg.pop("workflow", None)
+    cfg["aero"].pop("force_history", None)
     cfg.pop("calibration", None)
     cfg.pop("thermal_export", None)
     cfg["thermal"] = {"mode": "adiabatic"}

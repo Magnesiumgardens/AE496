@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import math
 from numbers import Real
+from pathlib import Path
+import re
 
-MODEL_VERSION = "1.0-planar-section"
+MODEL_VERSION = "2.0-planar-section-components"
 
 
 def positive(name, value):
@@ -82,6 +84,33 @@ def report_scalar(raw, target):
     if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value):
         raise ValueError(f"Invalid or ambiguous force value for {target!r}: {value!r}")
     return float(value)
+
+
+def report_iteration(raw, target):
+    """Read a Fluent report's actual iteration metadata, or return ``None``.
+
+    Both the observed 251 ``{name: [value, iteration]}`` records and clients'
+    separate ``(values, iterations)`` mappings are supported. A force value is
+    never used as an iteration counter.
+    """
+    values = raw[0] if isinstance(raw, (tuple, list)) and raw else raw
+    if not isinstance(values, dict) or target not in values:
+        return None
+    record = values[target]
+    candidate = None
+    if isinstance(record, (tuple, list)) and len(record) == 2:
+        candidate = record[1]
+    elif isinstance(raw, (tuple, list)) and len(raw) == 2 and isinstance(raw[1], dict):
+        candidate = raw[1].get(target)
+        if isinstance(candidate, (tuple, list)) and len(candidate) == 1:
+            candidate = candidate[0]
+    if candidate is None:
+        return None
+    if (isinstance(candidate, bool) or not isinstance(candidate, Real)
+            or not math.isfinite(candidate) or not float(candidate).is_integer()
+            or candidate < 0):
+        raise ValueError(f"Invalid iteration metadata for force report {target!r}: {candidate!r}")
+    return int(candidate)
 
 
 def _force_report(solver, kind, zones, direction):
@@ -222,7 +251,12 @@ def validate_saved_conditions(solver, cfg):
         wall_thermal_state(walls[name].thermal, cfg["thermal"])
 
 
-def aerodynamic_summary(solver, cfg, wall_zones):
+def configure_force_reports(solver, cfg, wall_zones):
+    """Set one-metre-depth whole-body dimensional drag/lift definitions.
+
+    Shared by final export and the native per-iteration report-file monitor.
+    The caller supplies the complete matched body-wall zone collection.
+    """
     state = reference_state(cfg)
     base = cfg["geometry"].get("body_wall_name", "body_wall")
     zones = [z for z in wall_zones if z == base or z.startswith(base + ".")]
@@ -240,28 +274,166 @@ def aerodynamic_summary(solver, cfg, wall_zones):
         refs.area = state["reference_area_per_unit_span_m"] * state["report_depth_m"]
     if state["reference_length_m"] is not None:
         refs.length = state["reference_length_m"]
-    names = [_force_report(solver, kind, zones, state[kind + "_direction"])
-             for kind in ("drag", "lift")]
+    state["body_wall_zones"] = zones
+    names = {kind: _force_report(solver, kind, zones, state[kind + "_direction"])
+             for kind in ("drag", "lift")}
+    return names, state
+
+
+def parse_force_components(text, zones):
+    """Read dimensional pressure/viscous/total columns from a Fluent table.
+
+    Fluent's native force report also prints coefficient columns. Only the
+    first three numeric columns under an explicit ``Forces [N]`` header are
+    accepted; coefficients, per-zone rows and Net are never double-counted.
+    This deliberately rejects unknown layouts rather than inventing a split.
+    """
+    if not re.search(r"\bForces?\s*[\[(]\s*N\s*[\])]", text, re.IGNORECASE):
+        raise ValueError("Native force report has no dimensional Forces [N] header")
+    lines = text.splitlines()
+    headers = [i for i, line in enumerate(lines) if re.search(
+        r"\bPressure\s+Viscous\s+Total\b", line, re.IGNORECASE)]
+    if len(headers) != 1:
+        raise ValueError("Native force report has no unambiguous Pressure Viscous Total table")
+    headings = re.findall(r"\b(?:Pressure|Viscous|Total)\b", lines[headers[0]], re.IGNORECASE)
+    if [value.casefold() for value in headings[:3]] != ["pressure", "viscous", "total"]:
+        raise ValueError("Native force report uses an unsupported force-column order")
+    rows = {}
+    net = None
+    for line in lines[headers[0] + 1:]:
+        fields = line.strip().split()
+        if not fields:
+            continue
+        label = fields[0].strip('"')
+        if label not in zones and label.casefold() != "net":
+            continue
+        try:
+            values = [float(value.replace("D", "E").replace("d", "e"))
+                      for value in fields[1:]]
+        except ValueError as exc:
+            raise ValueError(f"Non-numeric force row for {label!r}") from exc
+        if len(values) not in (3, 6) or not all(math.isfinite(v) for v in values):
+            raise ValueError(f"Unsupported force row for {label!r}: {fields[1:]!r}")
+        if label.casefold() == "net":
+            if net is not None:
+                raise ValueError("Native force report contains multiple Net rows")
+            net = values[:3]
+        else:
+            if label in rows:
+                raise ValueError(f"Native force report repeats body zone {label!r}")
+            rows[label] = values[:3]
+    if set(rows) != set(zones):
+        raise ValueError("Native force report does not list every requested body-wall zone")
+    summed = [sum(row[i] for row in rows.values()) for i in range(3)]
+    tolerance = max(1e-6, 1e-5 * max(abs(value) for value in (*summed, *(net or []))))
+    if net is not None and any(abs(a - b) > tolerance for a, b in zip(net, summed)):
+        raise ValueError("Native force Net row differs from the sum over body-wall zones")
+    pressure, viscous, total = net if net is not None else summed
+    if abs(pressure + viscous - total) > tolerance:
+        raise ValueError("Native pressure and viscous forces do not sum to native total")
+    return pressure, viscous, total
+
+
+def _drag_components(solver, cfg, state, total_drag):
+    """Use the supported 251 native report, not nonexistent force-type knobs."""
+    result = {
+        "pressure_drag_per_unit_span_N_m": None,
+        "viscous_drag_per_unit_span_N_m": None,
+        "component_status": "unavailable",
+    }
+    try:
+        work = cfg.get("project", {}).get("work_dir")
+        if not work:
+            raise ValueError("A project work directory is required for the native force table")
+        path = Path(work).resolve() / "aero_forces_drag.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        native = solver.settings.results.report.forces
+        option = "Forces"
+        argument = getattr(native, "option", None)
+        if argument is not None and hasattr(argument, "allowed_values"):
+            allowed = argument.allowed_values()
+            option = next((v for v in allowed if str(v).casefold() in ("forces", "force")), None)
+            if option is None:
+                raise ValueError(f"Native report does not expose Forces: {allowed!r}")
+        # Avoid consuming stale output if the native command fails before write.
+        path.unlink(missing_ok=True)
+        native(option=option, wall_zones=state["body_wall_zones"],
+               direction_vector=state["drag_direction"], write_to_file=True,
+               file_name=str(path), append_data=False)
+        pressure, viscous, native_total = parse_force_components(
+            path.read_text(encoding="utf-8-sig"), state["body_wall_zones"])
+        depth = state["report_depth_m"]
+        pressure, viscous, native_total = (v / depth for v in (pressure, viscous, native_total))
+        tolerance = max(1e-6, 1e-5 * max(abs(v) for v in
+                                       (pressure, viscous, native_total, total_drag)))
+        if abs(native_total - total_drag) > tolerance:
+            raise ValueError("Native force table total differs from the dimensional drag report")
+        result.update(
+            pressure_drag_per_unit_span_N_m=pressure,
+            viscous_drag_per_unit_span_N_m=viscous,
+            component_status="complete",
+            component_method="Fluent results.report.forces dimensional table",
+            component_report_file=str(path),
+            drag_component_balance={
+                "status": "passed", "pressure_plus_viscous_N_m": pressure + viscous,
+                "native_total_N_m": native_total, "total_drag_N_m": total_drag,
+                "difference_N_m": pressure + viscous - total_drag,
+                "tolerance_N_m": tolerance,
+                "note": "Tolerance allows rounded native table output; signed forces are retained.",
+            },
+        )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        result["component_error"] = str(exc)
+    return result
+
+
+def aerodynamic_summary(solver, cfg, wall_zones):
+    from .force_history import assess_saved_force_history
+
+    names, state = configure_force_reports(solver, cfg, wall_zones)
     # Query separately: 251 can return separate mappings for a multi-report
     # request, which is ambiguous with clients' value/iteration mappings.
     compute = solver.settings.solution.report_definitions.compute
-    drag, lift = [report_scalar(compute(report_defs=[name]), name)
-                  / state["report_depth_m"] for name in names]
+    drag, lift = [report_scalar(compute(report_defs=[names[kind]]), names[kind])
+                  / state["report_depth_m"] for kind in ("drag", "lift")]
+    components = _drag_components(solver, cfg, state, drag)
     width = state["reference_area_per_unit_span_m"]
     scale = state["dynamic_pressure_Pa"] * width if width is not None else None
     return {
         "status": "complete", "model_version": MODEL_VERSION,
-        **state, "body_wall_zones": zones,
+        **state, **components,
         "drag_per_unit_span_N_m": drag, "lift_per_unit_span_N_m": lift,
+        "total_drag_per_unit_span_N_m": drag,
         "Cd": drag / scale if scale is not None else None,
+        "Cd_pressure": (components["pressure_drag_per_unit_span_N_m"] / scale
+                        if scale is not None and components["component_status"] == "complete" else None),
+        "Cd_viscous": (components["viscous_drag_per_unit_span_N_m"] / scale
+                       if scale is not None and components["component_status"] == "complete" else None),
         "Cl": lift / scale if scale is not None else None,
         "L_over_D": lift / drag if drag != 0 else None,
         "coefficient_status": "computed" if scale is not None else "reference_width_required",
+        "force_stability": assess_saved_force_history(cfg),
         "convergence_status": "not_verified",
         "limitations": [
             "Sectional planar forces are not whole-vehicle or axisymmetric forces.",
-            "Total drag includes pressure and viscous contributions; no separate split is reported.",
+            "Total drag includes pressure and viscous forces; the split requires a validated native force table.",
             "Freestream normalization assumes calorically perfect air with configured gamma and R.",
             "Iterations completed is not evidence of convergence or mesh independence.",
         ],
     }
+
+
+def require_force_stability(cfg, result):
+    """Block acceptance when explicitly requested, while retaining measured forces."""
+    required = cfg.get("aero", {}).get("force_history", {}).get("require_stable", False)
+    if (cfg.get("aero", {}).get("enabled", True) and required
+            and result.get("force_stability", {}).get("status") != "passed"):
+        status = result.get("force_stability", {}).get("status", "not_verified")
+        raise ValueError(
+            f"Drag force-stability screen is {status}; measured forces and the saved CFD pair are retained. "
+            "Use study.py continue --config <case.yaml> --iterations 200 --stop-after aero to record additional "
+            "iterations without reinitializing the flow, then export again. "
+            "Missing legacy histories cannot be reconstructed from a final force value.")
+    if (cfg.get("aero", {}).get("enabled", True) and required
+            and result.get("residual_status") != "residual_screen_passed"):
+        raise ValueError("The aerodynamic result also requires a matching passed residual screen; measured forces are retained")

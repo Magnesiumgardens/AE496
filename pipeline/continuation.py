@@ -12,7 +12,7 @@ import yaml
 
 from .aero import validate_saved_conditions
 from .cfd import launch_solver
-from .iteration_history import iterate_with_history
+from .iteration_history import iterate_with_histories
 from .reporting import read_csv, read_json
 from .solver_numerics import configure_numerics, configure_residual_criteria
 from .temperature_export import atomic_csv, temperature_conditions
@@ -102,11 +102,12 @@ def continue_solver(cfg, iterations, output_dir):
         # Do not read_mesh, standard_initialize, hybrid_initialize, or overwrite
         # farfield/wall settings: retain the developed solution and residual scale.
         print(f"[continue] Continuing for up to {iterations} additional steady iterations; no initialization",flush=True)
-        summary["temperature_history"] = iterate_with_history(solver,segment_cfg,summary["body_wall_zones"])
+        summary.update(iterate_with_histories(solver,segment_cfg,summary["body_wall_zones"]))
         solver.settings.file.write_case_data(file_name=str(output/"04_final.cas.h5"))
         source = source_hashes(output)
-        if summary["temperature_history"].get("status") == "complete":
-            summary["temperature_history"]["source_sha256"] = source
+        for history in ("temperature_history", "force_history"):
+            if summary.get(history, {}).get("status") in ("complete", "partial"):
+                summary[history]["source_sha256"] = source
         summary.pop("numerical_quality",None)
         if cfg["thermal"]["mode"] == "radiative_equilibrium":
             # These reports belonged to the previous checkpoint. The saved-case
@@ -169,7 +170,8 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None, e
     archive = work/"_history"/(stamp+"_continue")
     archive.mkdir(parents=True)
     names = ("04_final.cas.h5","04_final.dat.h5","summary.json","solver_temperature_history.csv",
-             "solver_temperature_history.out","batch_logs/solver.log","_batch/stage_state.json")
+             "solver_temperature_history.out","batch_logs/solver.log","_batch/stage_state.json",
+             "solver_force_history.csv", "solver_force_history.out")
     for name in names:
         if (work/name).is_file():
             (archive/name).parent.mkdir(parents=True,exist_ok=True)
@@ -231,7 +233,7 @@ def continue_case(config_path, iterations=4800, courant=None, *, _runner=None, e
             summary["temperature_history"]["raw_copy_warning"] = str(exc)
             print(f"[continue] Raw history retained in staging: {exc}",flush=True)
             atomic_json(staged/"summary.json",summary)
-    transfers = [(staged/name,work/name) for name in names[:4] if (staged/name).is_file()]
+    transfers = [(staged/name,work/name) for name in (*names[:4], "solver_force_history.csv", "solver_force_history.out") if (staged/name).is_file()]
     transfers.append((staged/"solver.log",work/"batch_logs/solver.log"))
     replaced=[]
     try:

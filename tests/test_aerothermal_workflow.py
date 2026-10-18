@@ -53,6 +53,8 @@ class AerothermalWorkflowTests(unittest.TestCase):
         self.work = self.root / "runs/nose"
         self.work.mkdir(parents=True)
         self.cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
+        # Native force monitoring is mocked in this thermal-coupling fixture.
+        self.cfg["aero"]["force_history"]["require_stable"] = False
         self.cfg["project"].update(name="nose", work_dir=str(self.work))
         cad = self.root / "nose.x_t"
         cad.write_text("single shared CAD fixture")

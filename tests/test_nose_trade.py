@@ -259,7 +259,8 @@ class BatchTests(unittest.TestCase):
     def test_pareto_ties_failures_and_limits(self):
         def row(name, drag, temp, **kw):
             return {"case": name, "drag_per_unit_span_N_m": drag, "peak_temperature_K": temp,
-                    "status": "complete", "aero_status": "complete", **kw}
+                    "status": "complete", "aero_status": "complete", "force_stability_status": "passed",
+                    "residual_status": "residual_screen_passed", **kw}
         rows = [row("A", 10, 500), row("B", 12, 400), row("C", 12, 500),
                 row("tie", 10, 500), row("failed", 1, 1, status="failed"),
                 row("hot", 1, 1000, temperature_limit_status="exceeded"),
@@ -275,6 +276,8 @@ class BatchTests(unittest.TestCase):
                 aero = aerodynamic_summary(fluent(), config(), ["body_wall.1", "body_wall.2"])
                 (root / name / "aero_summary.json").write_text(json.dumps(aero))
                 rows.append({"case": name, "status": "complete", "aero_status": "complete",
+                    "force_stability_status": "passed",
+                    "residual_status": "residual_screen_passed",
                     "drag_per_unit_span_N_m": drag, "Cd": None, "peak_temperature_K": temp,
                     "max_heat_flux_W_m2": 100, "boundary_layer_used": True,
                     "thermal_loading_mode": "fixed_heat_flux"})

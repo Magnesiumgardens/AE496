@@ -107,14 +107,14 @@ class SingleContinuationTests(unittest.TestCase):
             self.assertEqual(segment["solver"]["max_iterations"], 50)
             self.assertEqual(zones, ["body_wall"])
             calls.append("iterate")
-            return {"status": "disabled"}
+            return {"temperature_history": {"status": "disabled"}, "force_history": {"status": "disabled"}}
 
         staged = f.work / "_continuation/native-test"
         with patch("pipeline.continuation.launch_solver", return_value=solver), \
              patch("pipeline.continuation.validate_saved_conditions") as validate, \
              patch("pipeline.continuation.configure_numerics", return_value={}), \
              patch("pipeline.continuation.configure_residual_criteria", return_value={}), \
-             patch("pipeline.continuation.iterate_with_history", side_effect=iterate):
+             patch("pipeline.continuation.iterate_with_histories", side_effect=iterate):
             summary = continue_solver(cfg, 50, staged)
         validate.assert_called_once_with(solver, cfg)
         self.assertEqual(calls, ["read_case_data", "mesh_quality", "iterate", "write_case_data", "exit"])

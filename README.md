@@ -79,6 +79,14 @@ Use `--stop-after aero` to finish primary CFD exports without calibration or Mec
 
 `batch.yaml` selects whether to run the solid stage. Drag and lift are sectional forces in **N/m of span** from the single radiating-wall solution. `Cd` and `Cl` require a justified common `aero.reference_area_per_unit_span_m`; a whole-vehicle or axisymmetric reference is not inferred.
 
+The common reference width is still undecided, so the template leaves it null
+and compares drag in N/m. Aerodynamic exports now separate total, pressure and
+viscous drag, and `solver_force_history.csv` records total drag/lift versus
+measured Fluent iterations. The default acceptance screen checks the recent
+five sampled drag values against a 1% tolerance in addition to the residual
+screen. Missing histories from older saved cases require a continuation, not
+a fresh initialization. See [force outputs, settings and continuation commands](docs/aerodynamic_forces.md).
+
 ## Mechanical settings and physical time
 
 ```yaml

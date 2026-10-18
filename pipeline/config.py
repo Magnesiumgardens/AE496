@@ -157,6 +157,9 @@ def validate_config(cfg):
     if cfg.get("aero", {}).get("enabled", True):
         from .aero import reference_state
         reference_state(cfg)
+        from .force_history import settings as force_history_settings
+        try:force_history_settings(cfg)
+        except ValueError as exc:raise ConfigError(str(exc)) from exc
     return cfg
 
 

@@ -52,8 +52,10 @@ class StudyResumeTests(unittest.TestCase):
         for path in stage_files(self.work, cfg)[stage]:
             path.parent.mkdir(parents=True, exist_ok=True)
             if stage == "aero":
+                from pipeline.force_history import assess_saved_force_history
                 path.write_text(json.dumps(dict(status="complete", model_version=MODEL_VERSION,
-                    body_wall_zones=[cfg["geometry"]["body_wall_name"]], **reference_state(cfg))))
+                    body_wall_zones=[cfg["geometry"]["body_wall_name"]],
+                    force_stability=assess_saved_force_history(cfg), **reference_state(cfg))))
             elif stage == "temperature_export":
                 if path.suffix == ".json":
                     from pipeline.utils import file_sha256
