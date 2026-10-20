@@ -28,11 +28,24 @@ class AerothermalLoad:
     equilibrium_flux: np.ndarray
     mode: str = "aerodynamic_surface_load"
     boundary_quadrature: list = field(default_factory=list)
+    segment_active: np.ndarray | None = None
+
+    def __post_init__(self):
+        mask = np.ones(len(self.xy), dtype=bool) if self.segment_active is None else np.asarray(self.segment_active)
+        if mask.shape != (len(self.xy),) or not np.isin(mask, (0, 1)).all() or not mask.any():
+            raise ThermalAnalysisError("Thermal segment mask must identify active edges of the complete closed solid boundary.")
+        self.segment_active = mask.astype(bool)
+
+    @property
+    def surface_active(self):
+        """A corner belongs to heating if either neighboring edge is active."""
+        return self.segment_active | np.roll(self.segment_active, 1)
 
     @property
     def gas_temperature(self):
         """Effective affine-law intercept temperature, not an exported gas field."""
-        return self.aerodynamic_source / self.coefficient
+        return np.divide(self.aerodynamic_source, self.coefficient,
+                         out=np.zeros_like(self.aerodynamic_source, dtype=float), where=np.asarray(self.coefficient) != 0)
 
     def incoming_flux(self, wall_temperature):
         return self.aerodynamic_source - self.coefficient * np.asarray(wall_temperature)
@@ -61,10 +74,15 @@ def validate_settings(cfd_cfg, cfg):
             raise ThermalAnalysisError(f"Mechanical {name} must match the CFD radiation-equilibrium calibration ({expected}).")
     settings.update(loading_mode="aerodynamic_surface_load", boundary_application="implicit_CONV_plus_RAD",
                     temperature_history_sampling="solved_solid_temperature", calibration_model="affine_two_wall_states")
+    from .aerothermal_calibration import calibration_settings
+    selection = calibration_settings(cfd_cfg)
+    settings["thermal_surface_selection"] = {key: selection[key] for key in
+                                            ("exclude_rear_face", "nose_direction", "rear_plane_tolerance_fraction")}
+    settings["rear_boundary"] = "insulated" if selection["exclude_rear_face"] else "aerodynamically_loaded"
     return settings
 
 
-def read_load(path):
+def read_load(path, *, scope=None):
     names = ("x_m", "y_m", "aerodynamic_conductance_W_m2K", "aerodynamic_source_W_m2",
              "equilibrium_temperature_K", "cold_wall_temperature_K", "cold_heat_flux_into_wall_W_m2",
              "equilibrium_convective_heat_flux_W_m2", "driving_temperature_K")
@@ -73,13 +91,28 @@ def read_load(path):
         rows.sort(key=lambda row: int(row["surface_order_index"]))
         order = [int(row["surface_order_index"]) for row in rows]
         data = np.asarray([[float(row[name]) for name in names] for row in rows])
-    except (TypeError, ValueError) as exc:
+        has_masks = any("thermal_segment_active" in row or "thermal_active" in row for row in rows)
+        if has_masks:
+            def flag(value):
+                number = float(value)
+                if number not in (0., 1.):raise ValueError("Expected a zero/one thermal mask")
+                return bool(number)
+            segment_active = np.asarray([flag(row["thermal_segment_active"]) for row in rows])
+            surface_active = np.asarray([flag(row["thermal_active"]) for row in rows])
+            if not np.array_equal(surface_active, segment_active | np.roll(segment_active, 1)):
+                raise ValueError("Thermal node and outgoing-edge masks do not agree")
+        else:
+            segment_active = np.ones(len(rows), dtype=bool)
+            surface_active = segment_active.copy()
+    except (KeyError, TypeError, ValueError) as exc:
         raise ThermalAnalysisError("Invalid calibrated aerodynamic surface-load CSV.") from exc
     if order != list(range(len(rows))) or len(rows) < 3 or not np.isfinite(data).all():
         raise ThermalAnalysisError("Calibrated surface nodes must have consecutive indices and finite values.")
-    if (data[:, 2] <= 0).any() or (data[:, 4:6] <= 0).any() or (data[:, 8] <= 0).any():
+    if not segment_active.any() or (data[surface_active, 2] <= 0).any() or (data[:, 4:6] <= 0).any() or (data[surface_active, 8] <= 0).any():
         raise ThermalAnalysisError("Calibrated H and absolute temperatures must be positive; no coefficient clipping is performed.")
-    if not np.allclose(data[:, 3] / data[:, 2], data[:, 8], rtol=1e-9, atol=1e-7):
+    if (data[~surface_active][:, [2, 3, 8]] != 0).any():
+        raise ThermalAnalysisError("Inactive-only boundary nodes require explicit zero load placeholders, not a fitted heating law.")
+    if not np.allclose(data[surface_active, 3] / data[surface_active, 2], data[surface_active, 8], rtol=1e-9, atol=1e-7):
         raise ThermalAnalysisError("Calibrated source/H does not match the supplied effective driving temperature.")
     xy = data[:, :2]
     if (np.linalg.norm(np.roll(xy, -1, axis=0) - xy, axis=1) <= 1e-12).any():
@@ -89,7 +122,17 @@ def read_load(path):
         raise ThermalAnalysisError("Calibrated boundary does not enclose a solid area.")
     if area2 < 0:
         data = data[::-1].copy()
-    return AerothermalLoad(data[:, :2], data[:, 2], data[:, 3], data[:, 4], data[:, 5], data[:, 6], data[:, 7])
+        # Reversing vertices changes outgoing edges into the old incoming edges.
+        segment_active = np.roll(segment_active, 1)[::-1].copy()
+    if scope is not None:
+        from .thermal_scope import active_segments
+        expected = active_segments(data[:, :2], exclude_rear_face=scope.get("exclude_rear_face", False),
+                                   nose_direction=scope.get("nose_direction", [1., 0.]),
+                                   tolerance_fraction=scope.get("rear_plane_tolerance_fraction", 1e-7))
+        if not np.array_equal(segment_active, expected):
+            raise ThermalAnalysisError("Calibrated thermal segment mask differs from the configured geometric rear cut.")
+    return AerothermalLoad(data[:, :2], data[:, 2], data[:, 3], data[:, 4], data[:, 5], data[:, 6], data[:, 7],
+                          segment_active=segment_active)
 
 
 def prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size):
@@ -101,8 +144,8 @@ def prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size):
     This is an independent boundary integral, not native heat-reaction output.
     """
     mapdl.lsel("NONE")
-    for line in lines:
-        mapdl.lsel("A", "LINE", "", int(line))
+    for index, line in enumerate(lines):
+        if load.segment_active[index]:mapdl.lsel("A", "LINE", "", int(line))
     mapdl.nsll("S", 1)
     selected = np.asarray(mapdl.mesh.nnum, dtype=int).copy()
     mapdl.allsel()
@@ -121,6 +164,7 @@ def prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size):
     quadrature = []
     covered = set()
     for segment, start in enumerate(load.xy):
+        if not load.segment_active[segment]:continue
         vector = load.xy[(segment + 1) % len(load.xy)] - start
         length = float(np.linalg.norm(vector))
         fraction = (selected_xy - start) @ vector / length**2
@@ -150,11 +194,13 @@ def integrated_powers(load, temperatures, settings):
     if not load.boundary_quadrature:
         raise ThermalAnalysisError("Missing FE boundary quadrature; surface energy cannot be reported as a global integral.")
     convective = radiative = 0.0
+    driving_temperature = load.gas_temperature
     for indices, shape, weights, segment, fraction in load.boundary_quadrature:
+        if not load.segment_active[segment]:continue
         next_index = (segment + 1) % len(load.xy)
         temperature = shape @ np.asarray(temperatures)[indices]
         h = (1 - fraction) * load.coefficient[segment] + fraction * load.coefficient[next_index]
-        driving = (1 - fraction) * load.gas_temperature[segment] + fraction * load.gas_temperature[next_index]
+        driving = (1 - fraction) * driving_temperature[segment] + fraction * driving_temperature[next_index]
         convective += float(weights @ (h * (driving - temperature)))
         radiative += float(weights @ (settings["emissivity"] * STEFAN_BOLTZMANN * (temperature**4 - settings["trad"]**4)))
     return np.asarray([convective, radiative, convective - radiative])

@@ -8,7 +8,7 @@ performed.
 
 ## Heating relation and signs
 
-At each geometrically matched CFD wall face, the code uses:
+At each selected, geometrically matched CFD wall face, the code uses:
 
 \[
 q''_{eq}=\epsilon\sigma(T_{eq}^4-T_{rad}^4),\quad
@@ -45,7 +45,7 @@ independently measured gas temperature.
 ## Mechanical implementation
 
 `pipeline/aerothermal_loading.py` supplies native MAPDL `CONV` and `RAD`
-loads on the reconstructed closed polygon. `H` and `B/H` are each linearly
+loads on the selected edges of the reconstructed closed polygon. `H` and `B/H` are each linearly
 interpolated along each boundary segment; their product need not be a linear
 interpolation of `B`. Native nonlinear iterations evaluate both loads using
 the current FE surface temperature. No `D,TEMP` condition is applied in this
@@ -150,6 +150,57 @@ material or duration settings continue to receive separate comparison groups.
 
 `solver_temperature_history.csv` remains indexed by Fluent convergence
 iteration. It is not physical time or an input to the transient solid solver.
+
+## Insulated rear cut
+
+The current template and updater select:
+
+```yaml
+calibration:
+  exclude_rear_face: true
+  rear_plane_tolerance_fraction: 1.0e-7
+reporting:
+  nose_direction: [1.0, 0.0]
+```
+
+The geometric nose direction is independent of the freestream direction. The
+rear is the single connected chain of flat edges whose endpoints lie on the
+minimum plane opposite that direction. The code fails if it cannot identify
+that chain unambiguously; it never selects edges because their fitted
+coefficients happen to be invalid. Split collinear rear edges are supported.
+
+The full polygon remains closed in CFD and Mechanical. Rear faces are omitted
+from the thermal fit, native Mechanical convection and radiation, surface
+histories, surface-load plots and global heat-input integrals. The back has
+natural zero-normal-flux boundary conditions: an **insulated cut**, with no
+attachment/contact conduction. It can still warm through conduction within
+the solid; its temperature is not constrained to 300 K. Solid temperature
+fields and all-solid peak-temperature bars include every solid node.
+
+At junctions with the top/bottom surfaces, nodal loading is projected only
+from the included adjacent edges. Excluded rear data do not dilute those
+values. Calibration diagnostics retain the original rear anchors and candidate
+slopes, while reporting active and excluded failures separately. A bad fit on
+any included edge still blocks thermal analysis.
+
+Load CSVs retain full closed geometry and explicit `thermal_active` masks;
+node CSVs also carry outgoing-edge `thermal_segment_active`. Zero load-law
+placeholders at rear-only nodes are marked inactive and are not calibrated
+coefficients. Surface-result CSVs omit rear-only nodes, retain the shared
+corner nodes, and preserve outgoing-edge masks so plots never draw a heated
+connection across the back.
+
+CFD still contains its original rear wall and wake, and total drag/lift still
+include all body-wall surfaces, including the rear. This thermal approximation
+does not convert the model into an attached full vehicle. Set
+`exclude_rear_face: false` explicitly to restore full-boundary thermal loading;
+the updater preserves an explicit choice.
+
+After updating, run the full batch with resume enabled. Valid primary CFD and
+cold-wall calibration states/exports are reused when native inputs match;
+thermal packages and Mechanical results are rebuilt for the new boundary
+scope. Previous thermal results are archived. Changing the actual CFD inputs
+still requires the corresponding native stages to run.
 
 ## Current approximations and validation limits
 

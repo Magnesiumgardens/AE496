@@ -4,7 +4,7 @@ from textwrap import fill
 
 import numpy as np
 
-from .reporting import _plotting, _save, numeric, wall_coordinates, write_csv
+from .reporting import _plotting, _save, numeric, plot_thermal_boundary, thermal_segment_flags, wall_coordinates, write_csv
 
 
 def surface_quantity_outputs(kind, fields, cases, summarized, directory, colors):
@@ -29,7 +29,7 @@ def surface_quantity_outputs(kind, fields, cases, summarized, directory, colors)
             ax.plot(times, [row["mean_" + field] for row in records], color=colors[name], linestyle="--")
         ax.set(ylabel=f"{component}\n[{unit}]")
         ax.grid(alpha=.3)
-    axes[0].set_title(f"Approximate {label} History (solid=max, dashed=simple wall-sample mean)")
+    axes[0].set_title(f"Approximate {label} History (solid=max, dashed=simple analyzed-wall mean)")
     axes[0].legend(fontsize=8)
     axes[-1].set_xlabel("Physical time [s]")
     created[stem + "_max_mean_history_png"] = _save(fig, directory / (stem + "_max_mean_history.png"), plt)
@@ -47,6 +47,8 @@ def surface_quantity_outputs(kind, fields, cases, summarized, directory, colors)
             row = records[index]
             profiles.append(dict(design=name, final_time_s=time, surface_order_index=int(row["surface_order_index"]),
                                  x_m=float(row["x_m"]), y_m=float(row["y_m"]), s_m=float(s), s_norm=float(sn),
+                                 **({"thermal_segment_active": int(thermal_segment_flags([row])[0])}
+                                    if "thermal_segment_active" in row else {}),
                                  **{field: float(row[field]) for field, _, _ in fields}))
     created["final_" + stem + "_profile_csv"] = str(write_csv(directory / ("final_" + stem + "_profile.csv"), profiles))
     for coordinate, suffix, xlabel in (
@@ -80,15 +82,17 @@ def surface_quantity_outputs(kind, fields, cases, summarized, directory, colors)
         for number, name in enumerate(names):
             time, xy, records = final[name]
             ax = axes[number, column]
-            closed = np.vstack([xy, xy[0]])
-            ax.plot(closed[:, 0], closed[:, 1], color="black", linewidth=.6)
+            plot_thermal_boundary(ax, records, color="black", linewidth=.6)
             points = ax.scatter(xy[:, 0], xy[:, 1], c=[float(row[field]) for row in records],
                                 s=18, vmin=vmin, vmax=vmax, cmap="viridis")
             ax.set(xlabel="x [m]", ylabel="y [m]", title=f"{fill(name, 32)} (t={time:g} s)\n{component}")
             ax.title.set_fontsize(10)
             ax.set_aspect("equal", adjustable="box")
         fig.colorbar(points, ax=axes[:, column].tolist(), label=unit, shrink=.8)
-    fig.suptitle(f"Approximate Final Surface {label} — boundary samples; common scale within each column")
+    scoped = any((thermal_segment_flags(records) is not None and not thermal_segment_flags(records).all())
+                 for _, _, records in final.values())
+    scope_label = "analyzed boundary only; insulated rear omitted" if scoped else "boundary samples"
+    fig.suptitle(f"Approximate Final Surface {label} — {scope_label}; common scale within each column")
     path = directory / ("final_" + stem + "_maps.png")
     # Constrained layout preserves shared colorbars on thin planar profiles.
     fig.savefig(path, dpi=160)

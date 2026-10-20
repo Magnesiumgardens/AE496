@@ -100,6 +100,7 @@ def wall_rows(time, load, wall_temperature, nnum, indices, distances, settings):
         if settings["include_rad"] else np.zeros(len(load.xy))
     )
     if load.mode == "aerodynamic_surface_load":
+        active_surface, driving_temperature = load.surface_active, load.gas_temperature
         return [
             {
                 "time_s": float(time), "surface_order_index": index,
@@ -111,11 +112,12 @@ def wall_rows(time, load, wall_temperature, nnum, indices, distances, settings):
                 "radiative_heat_flux_out_W_m2": float(radiation[index]),
                 "net_heat_flux_into_solid_W_m2": float(incoming[index] - radiation[index]),
                 "aerodynamic_conductance_W_m2K": float(load.coefficient[index]),
-                "effective_driving_temperature_K": float(load.gas_temperature[index]),
+                "effective_driving_temperature_K": float(driving_temperature[index]),
+                "thermal_segment_active": int(load.segment_active[index]),
                 "outside_calibration_temperature_range": bool(wall_temperature[index] < load.cold_temperature[index]
                                                                or wall_temperature[index] > load.equilibrium_temperature[index]),
             }
-            for index, point in enumerate(load.xy)
+            for index, point in enumerate(load.xy) if active_surface[index]
         ]
     rows = [
         {
@@ -198,14 +200,17 @@ def save_results(output, load, nnum, xyz, temperatures, times, settings, mesh_si
         for nid, point, value in zip(nnum, xyz, final)
     ])
     final_wall = []
-    for row in wall_history[-len(load.xy):]:
+    wall_sample_count = int(np.count_nonzero(load.surface_active)) if aerodynamic else len(load.xy)
+    for row in wall_history[-wall_sample_count:]:
         row = dict(row)
         row["thermal_wall_temperature_K"] = row["wall_temperature_K"]
         final_wall.append(row)
     write_csv(output / "wall_temperature_final.csv", final_wall)
     boundary_data = ({"boundary_aerodynamic_conductance_W_m2K": load.coefficient,
                       "boundary_aerodynamic_source_W_m2": load.aerodynamic_source,
-                      "boundary_effective_driving_temperature_K": load.gas_temperature} if aerodynamic else
+                      "boundary_effective_driving_temperature_K": load.gas_temperature,
+                      "boundary_thermal_segment_active": load.segment_active,
+                      "boundary_thermal_active": load.surface_active} if aerodynamic else
                      {"boundary_prescribed_temperature_K": load.surface_temperature} if prescribed else
                      {"boundary_gas_temperature_K":load.gas_temperature, "convection_coefficient_W_m2K":load.coefficient}
                      if load.mode == "convection" else {"boundary_flux_W_m2":load.cold_flux})
@@ -225,11 +230,14 @@ def apply_surface_loads(mapdl, lines, load, settings):
         return  # D,TEMP is assigned to all boundary nodes after meshing.
     convective = load.mode in {"convection", "aerodynamic_surface_load"}
     coefficients = np.broadcast_to(np.asarray(load.coefficient), (len(load.xy),)) if convective else None
+    driving_temperature = load.gas_temperature if convective else None
     for index, line in enumerate(lines):
+        if load.mode == "aerodynamic_surface_load" and not load.segment_active[index]:
+            continue  # A retained solid cut with no surface load is naturally insulated.
         next_index = (index + 1) % len(lines)
         if convective:
             mapdl.sfl(line, "CONV", float(coefficients[index]), float(coefficients[next_index]),
-                      float(load.gas_temperature[index]), float(load.gas_temperature[next_index]))
+                      float(driving_temperature[index]), float(driving_temperature[next_index]))
         else:  # Historical direct-flux utilities, never selected by the new runner.
             mapdl.sfl(line, "HFLUX", float(load.cold_flux[index]), float(load.cold_flux[next_index]))
         if settings["include_rad"]:
@@ -374,7 +382,7 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         from .aerothermal_calibration import verify_surface_package, calibration_paths
         from .aerothermal_loading import read_load as read_aerothermal_load
         boundary, metadata = verify_surface_package(cfg)
-        load = read_aerothermal_load(boundary)
+        load = read_aerothermal_load(boundary, scope=settings["thermal_surface_selection"])
         surface_package_sha256 = file_sha256(calibration_paths(cfg)["summary"])
         radiation = metadata["radiation"]
         if not (math.isclose(float(radiation["emissivity"]), settings["emissivity"], rel_tol=1e-10, abs_tol=1e-12)
@@ -476,15 +484,24 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
                            heat_transfer_status="constraint_reaction_not_exported")
             summary["thermal_mesh"]["prescribed_boundary_nodes"] = load.constrained_node_count
         if aerodynamic:
+            excluded_segments = int(np.count_nonzero(~load.segment_active))
+            if excluded_segments:
+                summary["limitations"].append("The retained rear cut is insulated: no convection or radiation is applied there, and attachment conduction into an omitted vehicle is not modeled.")
             summary.update(surface_package_sha256=surface_package_sha256,
                            source_surface_load_summary_sha256=surface_package_sha256,
                            surface_load_conditions=metadata["conditions"],
                            surface_load_derivation=metadata["derivation"],
                            surface_load_diagnostics=metadata["diagnostics"],
+                           source_surface_scope=metadata.get("thermal_scope", {}),
                            boundary_temperature_application="solved_with_implicit_CONV_and_RAD",
                            temperature_history_sampling="solved_wall_vertices_and_all_solid_nodes",
                            initial_state="uniform initial temperature; finite surface heating begins at t=0",
                            heat_transfer_status="postprocessed_temperature_dependent_convective_and_radiative_fluxes",
+                           thermal_surface_scope=dict(active_segments=int(np.count_nonzero(load.segment_active)),
+                                                      excluded_segments=excluded_segments,
+                                                      active_wall_vertices=int(np.count_nonzero(load.surface_active)),
+                                                      rear_boundary="insulated" if excluded_segments else "aerodynamically_loaded",
+                                                      full_solid_temperature_field_retained=True),
                            energy_method={"local": "trapezoid_in_time_at_original_CFD_vertices",
                                           "global_space": "5_point_Gaussian_quadrature_on_all_quadratic_FE_boundary_edges",
                                           "global_time": "trapezoid_over_saved_physical_substeps_including_initial_flux",
@@ -500,7 +517,8 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         if prescribed:
             description = f"prescribed equilibrium surface T={float(np.min(load.surface_temperature)):g}–{float(np.max(load.surface_temperature)):g} K"
         elif aerodynamic:
-            description = f"calibrated H={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g} W/(m² K), implicit radiation; surface temperature solved"
+            active_h = np.asarray(load.coefficient)[load.surface_active]
+            description = f"calibrated H={float(np.min(active_h)):g}–{float(np.max(active_h)):g} W/(m² K), implicit radiation; surface temperature solved"
         else:
             coefficient_description = (f"spatial h={float(np.min(load.coefficient)):g}–{float(np.max(load.coefficient)):g}" if endpoint
                                        else f"h={settings['h']:g}")

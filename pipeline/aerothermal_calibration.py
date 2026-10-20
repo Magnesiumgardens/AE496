@@ -13,13 +13,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .endpoint_loading import (face_values_to_nodes, match_faces_to_nodes,
-                               read_endpoint_faces, read_endpoint_nodes)
+from .endpoint_loading import match_faces_to_nodes, read_endpoint_faces, read_endpoint_nodes
 from .temperature_export import atomic_csv, temperature_conditions
-from .thermal_loading import ThermalAnalysisError, positive
+from .thermal_loading import ThermalAnalysisError, positive, _read_rows
+from .thermal_scope import active_segments, active_nodes, scoped_face_values_to_nodes
 from .utils import atomic_json, file_sha256
 
-MODEL_VERSION = "re-cold-affine-heating-1"
+MODEL_VERSION = "re-cold-affine-heating-2"
 STEFAN_BOLTZMANN = 5.670374419e-8
 
 
@@ -32,12 +32,25 @@ def calibration_settings(cfg):
     emissivity = float(thermal.get("emissivity", .9))
     if not np.isfinite(emissivity) or not 0 < emissivity <= 1:
         raise ThermalAnalysisError("Radiative calibration requires 0 < thermal.emissivity <= 1")
+    exclude_rear = values.get("exclude_rear_face", False)
+    if not isinstance(exclude_rear, bool):
+        raise ThermalAnalysisError("calibration.exclude_rear_face must be true or false")
+    try:
+        direction = np.asarray(cfg.get("reporting", {}).get("nose_direction", [1., 0.]), dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ThermalAnalysisError("reporting.nose_direction must be a finite nonzero 2-D vector") from exc
+    if direction.shape != (2,) or not np.isfinite(direction).all() or np.linalg.norm(direction) == 0:
+        raise ThermalAnalysisError("reporting.nose_direction must be a finite nonzero 2-D vector")
+    direction = direction / np.linalg.norm(direction)
     return dict(cold_wall_temperature_k=positive("calibration.cold_wall_temperature_k", values.get("cold_wall_temperature_k", 300)),
                 heat_flux_into_wall_sign=sign,
                 temperature_field_name=str(values.get("temperature_field_name", "temperature")),
                 heat_flux_field_name=str(values.get("heat_flux_field_name", "heat-flux")),
                 min_delta_temperature_k=positive("calibration.min_delta_temperature_k", values.get("min_delta_temperature_k", 25)),
                 coordinate_tolerance_m=positive("calibration.coordinate_tolerance_m", values.get("coordinate_tolerance_m", 1e-9)),
+                exclude_rear_face=exclude_rear,
+                rear_plane_tolerance_fraction=positive("calibration.rear_plane_tolerance_fraction", values.get("rear_plane_tolerance_fraction", 1e-7)),
+                nose_direction=direction.tolist(),
                 emissivity=emissivity,
                 external_radiation_temperature_K=positive("thermal.external_radiation_temperature_k", thermal.get("external_radiation_temperature_k", 3)))
 
@@ -244,7 +257,8 @@ def _matched_calibration_inputs(cfg):
 
 
 def _anchor_diagnostics(cfg, matched, *, write=False):
-    settings, paths, sources, _, _, re_faces, edges, re_ids, cold_faces, cold_ids, order = matched
+    settings, paths, sources, _, re_nodes, re_faces, edges, re_ids, cold_faces, cold_ids, order = matched
+    active = _active_calibration_segments(settings, re_nodes)
     tc, teq, qc = cold_faces[:, 3], re_faces[:, 3], cold_faces[:, 4]
     with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
         qeq = settings["emissivity"] * STEFAN_BOLTZMANN * (teq**4 - settings["external_radiation_temperature_K"]**4)
@@ -272,23 +286,26 @@ def _anchor_diagnostics(cfg, matched, *, write=False):
             cold_heat_flux_into_wall_W_m2=float(qc[index]), equilibrium_convective_heat_flux_W_m2=finite(qeq[index]),
             temperature_separation_K=float(delta[index]), cold_minus_equilibrium_heat_flux_W_m2=finite(gap[index]),
             relative_anchor_gap=relative_gap,
-            candidate_conductance_W_m2K=finite(h[index]), status=status))
-    failed = [row for row in rows if row["status"] != "passed"]
+            candidate_conductance_W_m2K=finite(h[index]), thermal_active=int(active[index]), status=status))
+    failed = [row for row in rows if row["thermal_active"] and row["status"] != "passed"]
+    excluded = [row for row in rows if not row["thermal_active"]]
     worst = sorted(failed, key=lambda row: row["candidate_conductance_W_m2K"]
                    if row["candidate_conductance_W_m2K"] is not None else -np.inf)[:10]
-    finite_h = h[np.isfinite(h)]
+    finite_h = h[np.isfinite(h) & active]
     summary = dict(status="failed" if failed else "passed", case=cfg["project"]["name"],
         source_sha256=sources, calibration_settings=settings, face_count=len(rows), invalid_face_count=len(failed),
-        nonpositive_conductance_face_count=sum(row["status"] == "nonpositive_conductance" for row in rows),
-        insufficient_temperature_separation_face_count=sum(row["status"] == "insufficient_temperature_separation" for row in rows),
-        nonpositive_cold_heat_flux_face_count=int(np.count_nonzero(qc <= 0)),
+        active_face_count=int(np.count_nonzero(active)), excluded_face_count=len(excluded),
+        excluded_invalid_face_count=sum(row["status"] != "passed" for row in excluded),
+        nonpositive_conductance_face_count=sum(row["status"] == "nonpositive_conductance" for row in failed),
+        insufficient_temperature_separation_face_count=sum(row["status"] == "insufficient_temperature_separation" for row in failed),
+        nonpositive_cold_heat_flux_face_count=int(np.count_nonzero((qc <= 0) & active)),
         failed_boundary_length_fraction=float(sum(row["segment_length_m"] for row in failed) / np.sum(edges[:, 0])),
         minimum_conductance_W_m2K=finite(finite_h.min()) if len(finite_h) else None,
         maximum_conductance_W_m2K=finite(finite_h.max()) if len(finite_h) else None,
-        minimum_cold_heat_flux_into_wall_W_m2=finite(qc.min()), maximum_cold_heat_flux_into_wall_W_m2=finite(qc.max()),
-        minimum_equilibrium_temperature_K=finite(teq.min()), maximum_equilibrium_temperature_K=finite(teq.max()),
-        worst_faces=worst,
-        interpretation="A passed CFD residual screen does not guarantee a positive local two-state heating slope. No coefficient is changed by this diagnosis.",
+        minimum_cold_heat_flux_into_wall_W_m2=finite(qc[active].min()), maximum_cold_heat_flux_into_wall_W_m2=finite(qc[active].max()),
+        minimum_equilibrium_temperature_K=finite(teq[active].min()), maximum_equilibrium_temperature_K=finite(teq[active].max()),
+        worst_faces=worst, excluded_faces=excluded,
+        interpretation="A passed CFD residual screen does not guarantee a positive local two-state heating slope. No coefficient is changed by this diagnosis. Explicitly excluded rear faces are retained as diagnostics but do not enter thermal calibration.",
         next_step="Inspect matched face temperatures, fluxes and positions before changing signs, wall states, numerics or the heating model.")
     if write:
         directory = paths["root"] / "thermal_bc"
@@ -297,6 +314,11 @@ def _anchor_diagnostics(cfg, matched, *, write=False):
         atomic_csv(summary["diagnostics_csv"], rows)
         atomic_json(summary["diagnostics_json"], summary)
     return summary
+
+
+def _active_calibration_segments(settings, nodes):
+    return active_segments(nodes[:, :2], exclude_rear_face=settings["exclude_rear_face"],
+        nose_direction=settings["nose_direction"], tolerance_fraction=settings["rear_plane_tolerance_fraction"])
 
 
 def diagnose_calibration(cfg, *, write=False):
@@ -313,27 +335,33 @@ def build_surface_package(cfg):
     matched = _matched_calibration_inputs(cfg)
     settings, paths, sources, re_metadata, re_nodes, re_faces, re_edges, re_ids, cold_faces, cold_ids, order = matched
     tc = settings["cold_wall_temperature_k"]
+    active = _active_calibration_segments(settings, re_nodes)
+    loaded_nodes = active_nodes(active)
     try:
         diagnostics = _anchor_diagnostics(cfg, matched, write=True)
         try:
-            h, source, qeq = derive_affine_heating(cold_faces[:, 3], re_faces[:, 3], cold_faces[:, 4],
+            selected_h, selected_source, selected_qeq = derive_affine_heating(cold_faces[active, 3], re_faces[active, 3], cold_faces[active, 4],
                 settings["emissivity"], settings["external_radiation_temperature_K"], settings["min_delta_temperature_k"])
         except ThermalAnalysisError as exc:
             raise ThermalAnalysisError(f"{exc} Rejected {diagnostics['invalid_face_count']} of {diagnostics['face_count']} matched faces. "
                 f"See {diagnostics['diagnostics_csv']} and {diagnostics['diagnostics_json']}. "
                 "Inspect saved results with study.py calibration-status --config <case.yaml>; no additional CFD is needed for that diagnosis.") from exc
+        # Inactive coefficients are explicit uncalibrated placeholders. Rear
+        # geometry remains present; no valid heating law is invented there.
+        h, source, qeq = (np.zeros(len(active)) for _ in range(3))
+        h[active], source[active], qeq[active] = selected_h, selected_source, selected_qeq
         lengths = re_edges[:, 0]
-        nodal_h = face_values_to_nodes(h, lengths)
-        nodal_source = face_values_to_nodes(source, lengths)
-        nodal_qcold = face_values_to_nodes(cold_faces[:, 4], lengths)
-        nodal_qeq = face_values_to_nodes(qeq, lengths)
-        driving = nodal_source / nodal_h
+        nodal_h = scoped_face_values_to_nodes(h, lengths, active)
+        nodal_source = scoped_face_values_to_nodes(source, lengths, active)
+        nodal_qcold = scoped_face_values_to_nodes(cold_faces[:, 4], lengths, active)
+        nodal_qeq = scoped_face_values_to_nodes(qeq, lengths, active)
+        driving = np.divide(nodal_source, nodal_h, out=np.zeros_like(nodal_source), where=loaded_nodes)
         right_h, right_driving = np.roll(nodal_h, -1), np.roll(driving, -1)
-        cold_power = float(np.sum(lengths * cold_faces[:, 4]))
-        absolute_cold_power = float(np.sum(lengths * np.abs(cold_faces[:, 4])))
-        native_cold_power = float(np.sum(lengths / 6 * (
+        cold_power = float(np.sum(lengths[active] * cold_faces[active, 4]))
+        absolute_cold_power = float(np.sum(lengths[active] * np.abs(cold_faces[active, 4])))
+        native_cold_power = float(np.sum((lengths / 6 * (
             nodal_h * driving + (nodal_h + right_h) * (driving + right_driving)
-            + right_h * right_driving) - lengths * tc * (nodal_h + right_h) / 2))
+            + right_h * right_driving) - lengths * tc * (nodal_h + right_h) / 2)[active]))
         face_rows = []
         for index, point in enumerate(re_faces):
             edge = re_edges[index]
@@ -341,26 +369,33 @@ def build_surface_package(cfg):
                 re_face_index=re_ids[index][1], cold_face_index=cold_ids[order[index]][1],
                 x_m=float(point[0]), y_m=float(point[1]), z_m=float(point[2]), segment_length_m=float(edge[0]),
                 start_x_m=float(edge[1]), start_y_m=float(edge[2]), end_x_m=float(edge[3]), end_y_m=float(edge[4]),
+                thermal_active=int(active[index]),
                 equilibrium_temperature_K=float(point[3]), cold_wall_temperature_K=tc,
                 cold_heat_flux_into_wall_W_m2=float(cold_faces[index, 4]), equilibrium_convective_heat_flux_W_m2=float(qeq[index]),
                 aerodynamic_conductance_W_m2K=float(h[index]), aerodynamic_source_W_m2=float(source[index]),
-                driving_temperature_K=float(source[index] / h[index])))
+                driving_temperature_K=float(source[index] / h[index]) if active[index] else 0.))
         node_rows = [dict(surface_order_index=index, x_m=float(point[0]), y_m=float(point[1]), z_m=float(point[2]),
             equilibrium_temperature_K=float(point[3]), cold_wall_temperature_K=tc,
             cold_heat_flux_into_wall_W_m2=float(nodal_qcold[index]), equilibrium_convective_heat_flux_W_m2=float(nodal_qeq[index]),
             aerodynamic_conductance_W_m2K=float(nodal_h[index]), aerodynamic_source_W_m2=float(nodal_source[index]),
-                driving_temperature_K=float(driving[index])) for index, point in enumerate(re_nodes)]
+            driving_temperature_K=float(driving[index]), thermal_active=int(loaded_nodes[index]),
+            thermal_segment_active=int(active[index])) for index, point in enumerate(re_nodes)]
         atomic_csv(paths["faces"], face_rows)
         atomic_csv(paths["nodes"], node_rows)
         # The face anchors are exact. Projection smooths H and the source; actual
         # native RE nodal temperatures are diagnostics, not prescribed values.
-        nodal_re_residual = nodal_source - nodal_h * re_nodes[:, 3] - settings["emissivity"] * STEFAN_BOLTZMANN * (
-            re_nodes[:, 3]**4 - settings["external_radiation_temperature_K"]**4)
+        nodal_re_residual = nodal_source[loaded_nodes] - nodal_h[loaded_nodes] * re_nodes[loaded_nodes, 3] - settings["emissivity"] * STEFAN_BOLTZMANN * (
+            re_nodes[loaded_nodes, 3]**4 - settings["external_radiation_temperature_K"]**4)
         summary = dict(status="complete", model_version=MODEL_VERSION, loading_mode="aerodynamic_surface_load",
             conditions=temperature_conditions(cfg), source_sha256=sources,
             source_geometry_sha256=file_sha256(cfg["geometry"]["input_file"]), mesh_sha256=re_metadata["mesh_sha256"],
             faces_csv_sha256=file_sha256(paths["faces"]), nodes_csv_sha256=file_sha256(paths["nodes"]),
             face_count=len(face_rows), point_count=len(node_rows), calibration_settings=settings,
+            thermal_scope=dict(rear_boundary="insulated" if settings["exclude_rear_face"] else "aerodynamically_loaded",
+                active_face_count=int(np.count_nonzero(active)), excluded_face_count=int(np.count_nonzero(~active)),
+                active_boundary_length_m=float(np.sum(lengths[active])), excluded_boundary_length_m=float(np.sum(lengths[~active])),
+                thermal_segment_active=active.astype(int).tolist(), thermal_active=loaded_nodes.astype(int).tolist(),
+                geometry="Complete closed CFD/solid boundary retained", aerodynamic_force_scope="Complete CFD body wall unchanged"),
             radiation=dict(emissivity=settings["emissivity"], external_radiation_temperature_K=settings["external_radiation_temperature_K"],
                            stefan_boltzmann_W_m2K4=STEFAN_BOLTZMANN),
             derivation=dict(formula="q_conv(T_w) = aerodynamic_source - aerodynamic_conductance * T_w",
@@ -372,8 +407,8 @@ def build_surface_package(cfg):
             endpoint_faces_sha256={state:file_sha256(paths[f"{state}_faces"]) for state in ("re", "cold")},
             endpoint_metadata_sha256={state:file_sha256(paths[f"{state}_summary"]) for state in ("re", "cold")},
             face_matching="Closed loops, zone names, centroids, endpoints and common mesh; native local face indices are diagnostic only",
-            projection="Adjacent-length-weighted conductance and source projected separately; driving temperature is projected source / projected conductance",
-            diagnostics=dict(minimum_conductance_W_m2K=float(h.min()), maximum_conductance_W_m2K=float(h.max()),
+            projection="Adjacent active-face-length-weighted conductance and source projected separately; inactive rear faces never contribute to corner values. Driving temperature is projected source / projected conductance on loaded nodes only.",
+            diagnostics=dict(minimum_conductance_W_m2K=float(h[active].min()), maximum_conductance_W_m2K=float(h[active].max()),
                 cold_face_heat_input_per_unit_span_W_m=cold_power,
                 native_linear_conductance_driving_temperature_cold_power_W_m=native_cold_power,
                 native_linear_conductance_driving_temperature_cold_power_error_fraction=(native_cold_power - cold_power) / absolute_cold_power if absolute_cold_power else None,
@@ -387,6 +422,7 @@ def build_surface_package(cfg):
                 "MAPDL CONV interpolates conductance and driving temperature separately; their product differs from a linearly interpolated source between vertices, with the cold-load integral error reported explicitly.",
                 "The local affine law approximates two complete steady wall-state solutions; it is not an independently measured local derivative or a conjugate-flow response to arbitrary wall-temperature patterns.",
                 "Values outside the two wall-temperature states are affine extrapolations; no clipping or gas chemistry correction is applied.",
+                *( ["The excluded rear closure is an insulated solid cut: zero applied convection/radiation and no modeled conduction into an attached vehicle; the existing full-boundary CFD and wake remain unchanged."] if settings["exclude_rear_face"] else []),
                 "Residual screening and shared-source checks do not establish mesh independence or experimental validity."])
         atomic_json(paths["summary"], summary)
         return summary
@@ -418,6 +454,29 @@ def verify_surface_package(cfg):
                     raise ThermalAnalysisError(f"{state}: endpoint {field} changed after surface-load calibration")
             if metadata.get("endpoint_metadata_sha256", {}).get(state) != file_sha256(paths[f"{state}_summary"]):
                 raise ThermalAnalysisError(f"{state}: endpoint metadata changed after surface-load calibration")
+        settings = calibration_settings(cfg)
+        vertices = read_endpoint_nodes(paths["re_nodes"])
+        selected = _active_calibration_segments(settings, vertices)
+        selected_nodes = active_nodes(selected)
+        scope = metadata.get("thermal_scope", {})
+        if (scope.get("thermal_segment_active") != selected.astype(int).tolist()
+                or scope.get("thermal_active") != selected_nodes.astype(int).tolist()
+                or scope.get("rear_boundary") != ("insulated" if settings["exclude_rear_face"] else "aerodynamically_loaded")):
+            raise ThermalAnalysisError("Aerothermal package thermal scope differs from the configured geometric rear boundary")
+        for key, expected in (("faces", selected), ("nodes", selected_nodes)):
+            required = {"surface_order_index", "thermal_active"}
+            if key == "nodes":required.add("thermal_segment_active")
+            rows = _read_rows(paths[key], required)
+            try:
+                rows.sort(key=lambda row: int(row["surface_order_index"]))
+                actual = [int(row["thermal_active"]) for row in rows]
+                indices = [int(row["surface_order_index"]) for row in rows]
+                outgoing = [int(row["thermal_segment_active"]) for row in rows] if key == "nodes" else selected.astype(int).tolist()
+            except (ValueError, TypeError) as exc:
+                raise ThermalAnalysisError("Aerothermal package has invalid thermal scope flags") from exc
+            if (indices != list(range(len(selected))) or actual != expected.astype(int).tolist()
+                    or outgoing != selected.astype(int).tolist()):
+                raise ThermalAnalysisError("Aerothermal package thermal scope flags do not match its full closed geometry")
     except OSError as exc:
         raise ThermalAnalysisError(f"Current aerothermal calibration sources are missing: {exc}") from exc
     return paths["nodes"], metadata

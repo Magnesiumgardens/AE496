@@ -12,6 +12,26 @@ from pipeline.thermal_loading import ThermalAnalysisError
 from pipeline.utils import atomic_json, file_sha256
 
 
+def reusable_cold_export(cfg, cold, config_path):
+    """Reuse native states when only thermal surface selection changed.
+
+    A recorded configuration is required in addition to matching source hashes,
+    exported fields and residual metadata. Changed native solver inputs still
+    require a new calibration solve; surface masking does not change that CFD.
+    """
+    if not config_path.is_file():
+        return False
+    try:
+        previous = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(previous, dict):return False
+        keys = ("project", "geometry", "mesh", "flight", "physics", "thermal", "solver", "runtime", "outputs")
+        if any(previous.get(key) != cold.get(key) for key in keys):return False
+        verify_calibration_export(cfg, "cold")
+    except (ValueError, OSError, ThermalAnalysisError):
+        return False
+    return True
+
+
 def run_calibration(cfg):
     from pipeline.cfd import export_saved_case
     from pipeline.solution_quality import assess_log, save_diagnostics
@@ -30,6 +50,9 @@ def run_calibration(cfg):
     directory.mkdir(parents=True, exist_ok=True)
     config_path = directory / "_batch/config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    if reusable_cold_export(cfg, cold, config_path):
+        print("[calibration] Reusing verified cold-wall CFD and exported fields; rebuilding thermal surface loads only.", flush=True)
+        return build_surface_package(cfg)
     config_path.write_text(yaml.safe_dump(cold, sort_keys=False), encoding="utf-8")
     log = directory / "batch_logs/solver.log"
     run_stage([sys.executable, "-u", str(Path(__file__).resolve()), "--config",

@@ -95,6 +95,7 @@ def update_project(root, source, revision=None):
     print("[update] Former hybrid/native startup defaults are repaired to freestream, Courant 0.3 and first-order flow.")
     print("[update] Custom numerical controls, material choices and exposure durations are retained.")
     print("[update] Cold-wall calibration enables solved surface warm-up with convection and radiation; no prescribed wall temperature.")
+    print("[update] Thermal rear-cut selection is stored in calibration.exclude_rear_face; missing choices default to insulated. Full-body CFD force integration is retained.")
     return backup
 
 

@@ -190,6 +190,8 @@ Each nose gets normalized back → nose → back temperature profiles, wall and 
 
 Heat flux and accumulated heat load also have maximum/mean histories, final normalized surface profiles and boundary maps, separately showing convection, radiation and net heating. The maximum-temperature bar chart uses each nose's peak over all saved solid nodes and physical times, rather than only its final temperature. Run `study.py report --runs-dir runs` to regenerate these figures without Ansys; see [plot filenames and definitions](docs/aerodynamic_surface_load.md).
 
+The current thermal template excludes the flat rear closure using `calibration.exclude_rear_face: true`. It keeps the solid closed but treats the rear as an insulated cut: no applied gas heating or radiation, and no modeled attachment conduction. Each nose's flux/load plots and energy integrals cover the included nose/top/bottom surfaces. Full-solid temperatures and maximum-temperature bars still include the entire solid. CFD geometry, wake and full-body drag/lift integration retain the rear. Updating rebuilds the affected thermal results while reusing compatible saved CFD states.
+
 Current reports verify mode, both calibration case/data pairs, boundary-package provenance and solid result hashes. Incompatible flight, gas, wall-radiation, mesh, material or exposure settings are excluded or separated. Existing steady RE plots retain equilibrium labels; new Mechanical surface histories are labeled as solved. Historical prescribed-surface/adiabatic plots are not relabeled as new solved-temperature results.
 
 Historical supplied CSVs remain available explicitly:

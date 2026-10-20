@@ -66,6 +66,10 @@ workflow:
 
 calibration:
   enabled: true
+  # Keep the back in both meshes; Mechanical treats this flat cut as insulated.
+  # Selection uses reporting.nose_direction, independent of airflow direction.
+  exclude_rear_face: true
+  rear_plane_tolerance_fraction: 1.0e-7
   cold_wall_temperature_k: 300.0
   # Fluent heat-flux is outward from this fluid domain; verify this convention.
   heat_flux_into_wall_sign: -1.0

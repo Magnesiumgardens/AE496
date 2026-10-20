@@ -182,7 +182,8 @@ def single_solve_config(cfg):
     cfg["calibration"] = _with_defaults(cfg.get("calibration", {}), dict(
         enabled=True, cold_wall_temperature_k=300.0, heat_flux_into_wall_sign=-1.0,
         temperature_field_name="temperature", heat_flux_field_name="heat-flux",
-        min_delta_temperature_k=25.0, coordinate_tolerance_m=1e-9))
+        min_delta_temperature_k=25.0, coordinate_tolerance_m=1e-9,
+        exclude_rear_face=True, rear_plane_tolerance_fraction=1e-7))
     cfg["calibration"]["enabled"] = True
     export = cfg.setdefault("temperature_export", {})
     export["enabled"] = True

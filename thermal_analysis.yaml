@@ -1,5 +1,6 @@
 # Mechanical solves surface and interior temperature from a 300 K initial state.
 # Gas heating uses the RE/cold calibration. Radiation uses epsilon/Trad from CFD.
+# The CFD case's calibration.exclude_rear_face selects an insulated rear cut.
 mapdl_version: 251
 processors: 4
 # Bound license/server startup separately from the full Mechanical stage.

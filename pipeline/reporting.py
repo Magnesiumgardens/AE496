@@ -52,6 +52,45 @@ def numeric(value):
         return None
 
 
+def thermal_segment_flags(records):
+    """Read outgoing segment scope; missing flags retain historical behavior."""
+    if not any("thermal_segment_active" in row for row in records):
+        return None
+    if not all("thermal_segment_active" in row for row in records):
+        raise ValueError("Thermal boundary scope flags are missing from some surface samples")
+    flags = []
+    for row in records:
+        value = row["thermal_segment_active"]
+        value = {"true": 1, "false": 0}.get(str(value).casefold(), value)
+        value = numeric(value)
+        if value not in (0, 1):
+            raise ValueError("Thermal segment flags must be zero or one")
+        flags.append(bool(value))
+    return np.asarray(flags, dtype=bool)
+
+
+def thermal_boundary_segments(records, close_legacy=True):
+    """Connect only analyzed outgoing edges, leaving the insulated rear open.
+
+    Back-only vertices have already been omitted from saved surface histories.
+    An inactive outgoing edge therefore marks the gap between retained rear
+    corners, even when the original closed-loop index zero lies on that gap.
+    """
+    xy = np.asarray([[float(row["x_m"]), float(row["y_m"])] for row in records])
+    flags = thermal_segment_flags(records)
+    if flags is None:
+        flags = np.ones(len(records), dtype=bool)
+        if not close_legacy and len(flags):flags[-1] = False
+    return np.stack([xy[flags], np.roll(xy, -1, axis=0)[flags]], axis=1)
+
+
+def plot_thermal_boundary(ax, records, close_legacy=True, **kwargs):
+    segments = thermal_boundary_segments(records, close_legacy)
+    separated = np.full((len(segments) * 3, 2), np.nan)
+    separated[::3], separated[1::3] = segments[:, 0], segments[:, 1]
+    return ax.plot(separated[:, 0], separated[:, 1], **kwargs)
+
+
 def build_result_row(geometry_file, case_name, case_dir, status, elapsed_s, error=""):
     """Read persisted scientific values without rerunning or rewriting a solution."""
     case_dir = Path(case_dir)
@@ -348,7 +387,7 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
     runs_dir, output_dir = Path(runs_dir), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     histories, profiles, summaries, warnings = [], [], [], []
-    prescribed_cases, aerodynamic_cases, solid_histories, surface_load_histories = set(), set(), {}, {}
+    prescribed_cases, aerodynamic_cases, rear_insulated_cases, solid_histories, surface_load_histories = set(), set(), set(), {}, {}
     validated_raw_design = None
     design_order = [directory.name for directory in sorted(runs_dir.iterdir())
                     if (directory / "thermal_analysis/wall_temperature_history.csv").is_file()] if runs_dir.is_dir() else []
@@ -373,7 +412,10 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
             aerodynamic = thermal_summary.get("loading_mode") == "aerodynamic_surface_load"
             if prescribed:prescribed_cases.add(directory.name)
             if aerodynamic:aerodynamic_cases.add(directory.name)
-            history, profile, summary = summarize_wall_history(read_csv(raw), directory.name,
+            wall_records = read_csv(raw)
+            flags = thermal_segment_flags(wall_records)
+            if flags is not None and not flags.all():rear_insulated_cases.add(directory.name)
+            history, profile, summary = summarize_wall_history(wall_records, directory.name,
                 cfg.get("reporting", {}).get("nose_direction", [1, 0]))
             histories.extend(history)
             profiles.extend(profile)
@@ -383,7 +425,7 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
             write_csv(report_dir / "final_wall_temperature.csv", profile)
             _wall_plots(history, profile, report_dir, comparison=False, colors=colors, prescribed=prescribed,
                         aerodynamic=aerodynamic)
-            _source_wall_plots(read_csv(raw), report_dir)
+            _source_wall_plots(wall_records, report_dir)
             if aerodynamic:
                 load_records = {"nose_direction": cfg.get("reporting", {}).get("nose_direction", [1, 0])}
                 for kind, name in (("flux", "surface_heat_flux_history.csv"), ("energy", "surface_energy_history.csv"),
@@ -501,11 +543,12 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
                     reference_data="Imported historical data are report fixtures, not new simulation results.",
                     prescribed_surface_cases=sorted(prescribed_cases),
                     aerodynamic_surface_load_cases=sorted(aerodynamic_cases),
+                    rear_insulated_cases=sorted(rear_insulated_cases),
                     surface_interpretation=("Aerodynamic-load cases solve surface temperatures during physical-time conduction with temperature-dependent convection and outward radiation. "
                                             "Prescribed cases impose the steady CFD surface temperature as a step; their surface histories are constraints."),
                     surface_load_mean_definition="Simple arithmetic means of saved wall samples; use global histories for spatially integrated boundary power and energy.",
                     surface_energy_interpretation="Saved time-integrated net boundary energy is J/m² locally and J/m per unit span globally; it is not a volume-temperature average.",
-                    surface_load_plot_interpretation="Approximate signed convection, outward radiation and net loads from the saved thermal law; maps show boundary samples only. Normalized profiles omit the rear closure, while histories and global integrals retain it.",
+                    surface_load_plot_interpretation="Approximate signed convection, outward radiation and net loads from the saved thermal law; maps show analyzed boundary samples only. For rear-insulated cases the back is omitted from surface histories, plots and global load integrals; the full solid remains in conduction and solid-temperature statistics.",
                     peak_temperature_definition="Maximum over every saved physical result set and all solid nodes, including the initial state; not the final-time maximum or a wall-only statistic.",
                     validated_unlabeled_wall_design=validated_raw_design,
                     outputs=created)
@@ -524,10 +567,13 @@ def _source_wall_plots(records, directory):
     rows = sorted((row for row in records if float(row["time_s"]) == time),
                   key=lambda row: int(row["surface_order_index"]))
     xy = np.array([[float(row["x_m"]), float(row["y_m"])] for row in rows])
+    flags = thermal_segment_flags(rows)
+    scoped = flags is not None and not flags.all()
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(xy[:, 0], xy[:, 1], label="Saved CFD wall coordinates")
+    plot_thermal_boundary(ax, rows, close_legacy=False,
+                          label="Thermally analyzed surface" if scoped else "Saved CFD wall coordinates")
     ax.scatter(xy[:, 0], xy[:, 1], s=10)
-    ax.set(xlabel="x [m]", ylabel="y [m]", title="Saved Wall Boundary")
+    ax.set(xlabel="x [m]", ylabel="y [m]", title="Thermally Analyzed Boundary (rear insulated)" if scoped else "Saved Wall Boundary")
     ax.set_aspect("equal", adjustable="box")
     ax.legend()
     _save(fig, directory / "wall_boundary.png", plt)
@@ -540,15 +586,21 @@ def _source_wall_plots(records, directory):
         q = np.array([float(row[flux_key]) for row in rows])
         fig, ax = plt.subplots(figsize=(9, 4))
         points = ax.scatter(xy[:, 0], xy[:, 1], c=q, s=20)
-        ax.plot(xy[:, 0], xy[:, 1], linewidth=0.5, color="black")
+        plot_thermal_boundary(ax, rows, close_legacy=False, linewidth=0.5, color="black")
         fig.colorbar(points, ax=ax, label=flux_key.replace("_", " "))
         ax.set(xlabel="x [m]", ylabel="y [m]", title=f"Saved Surface Heat Flux (t={time:g} s)")
         ax.set_aspect("equal", adjustable="box")
         _save(fig, directory / "final_wall_heat_flux_map.png", plt)
-        distance = np.r_[0,np.cumsum(np.linalg.norm(np.diff(xy,axis=0),axis=1))]
+        order = np.arange(len(rows))
+        if scoped:
+            gaps = np.flatnonzero(~flags)
+            if len(gaps) != 1:
+                raise ValueError("Thermal surface profile requires one contiguous analyzed path around the insulated rear")
+            order = np.roll(order, -int(gaps[0] + 1))
+        distance = np.r_[0,np.cumsum(np.linalg.norm(np.diff(xy[order],axis=0),axis=1))]
         fig, ax = plt.subplots(figsize=(9,4))
-        ax.plot(distance,q)
-        ax.set(xlabel="Distance along saved wall order [m]",ylabel="Heat flux into wall [W/m²]",
+        ax.plot(distance,q[order])
+        ax.set(xlabel="Distance along analyzed wall [m]" if scoped else "Distance along saved wall order [m]",ylabel="Heat flux into wall [W/m²]",
                title=f"Saved Surface Heat Flux (t={time:g} s)")
         ax.grid(alpha=.3)
         _save(fig,directory/"final_wall_heat_flux_profile.png",plt)

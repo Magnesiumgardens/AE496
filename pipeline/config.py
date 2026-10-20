@@ -85,6 +85,20 @@ def validate_config(cfg):
     if strategy not in (None, "two_endpoint", "single_solve"):
         raise ConfigError("workflow.strategy must be single_solve or two_endpoint when specified")
     if strategy == "single_solve":
+        selection = cfg.get("calibration", {}) or {}
+        if not isinstance(selection, dict):raise ConfigError("calibration must contain a mapping")
+        if not isinstance(selection.get("exclude_rear_face", False), bool):
+            raise ConfigError("calibration.exclude_rear_face must be true or false")
+        tolerance = positive("calibration.rear_plane_tolerance_fraction", selection.get("rear_plane_tolerance_fraction", 1e-7))
+        if tolerance >= .01:raise ConfigError("calibration.rear_plane_tolerance_fraction must be below 0.01")
+        if selection.get("exclude_rear_face", False):
+            geometric_direction = cfg.get("reporting", {}).get("nose_direction", [1., 0.])
+            try:
+                gx, gy = map(float, geometric_direction)
+            except (ValueError, TypeError) as exc:
+                raise ConfigError("reporting.nose_direction must be a finite nonzero XY vector for rear selection") from exc
+            if not math.isfinite(math.hypot(gx, gy)) or math.hypot(gx, gy) == 0:
+                raise ConfigError("reporting.nose_direction must be a finite nonzero XY vector for rear selection")
         calibration = cfg.get("_calibration_kind") == "cold_wall" and cfg.get("_study_work_dir")
         if calibration:
             if cfg["thermal"]["mode"] != "fixed_temperature":

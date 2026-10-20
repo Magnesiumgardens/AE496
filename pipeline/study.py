@@ -95,6 +95,10 @@ def stage_fingerprint(stage, cfg, thermal_cfg, outputs):
     if stage == "aero":
         from .aero import MODEL_VERSION
         values["export_model_version"] = MODEL_VERSION
+    if stage == "calibration":
+        from .aerothermal_calibration import MODEL_VERSION, calibration_settings
+        values["surface_load_model_version"] = MODEL_VERSION
+        values["effective_calibration_settings"] = calibration_settings(cfg)
     inputs = {"geometry": file_hash(cfg["geometry"]["input_file"])}
     aerodynamic = thermal_cfg.get("loading", {}).get("mode") == "aerodynamic_surface_load"
     if stage == "thermal" and not aerodynamic:
@@ -282,6 +286,12 @@ def _failed_during_meshing(case_dir, stage_name="01_cfd"):
 def _archive_stage(stage, work, cfg, state):
     """Retain stale stage and downstream artifacts before rerunning them."""
     paths = stage_files(work, cfg)
+    preserve_cold = False
+    cold_directory = work / "cfd/cold_calibration"
+    if stage == "calibration":
+        from run_calibration import reusable_cold_export
+        from .aerothermal_calibration import calibration_cfg
+        preserve_cold = reusable_cold_export(cfg, calibration_cfg(cfg), cold_directory / "_batch/config.yaml")
     candidates = []
     for item in INVALIDATES[stage]:
         candidates.extend(paths[item])
@@ -307,7 +317,15 @@ def _archive_stage(stage, work, cfg, state):
         state["stages"].pop("thermal", None)
     if "calibration" in INVALIDATES[stage]:
         candidates.append(work / "cfd/cold_calibration")
-    if "thermal" in INVALIDATES[stage]:candidates.append(work / "thermal_analysis")
+    if "thermal" in INVALIDATES[stage]:
+        # Per-nose figures must not continue to show a superseded rear-boundary
+        # model if the new calibration/thermal stage fails. Gas figures can be
+        # regenerated from their saved exports without another native solve.
+        candidates.extend([work / "thermal_analysis", work / "reports"])
+    if preserve_cold:
+        # A thermal mask/package change does not invalidate the native cold
+        # solve. Its verifier still checks configuration, hashes and residuals.
+        candidates = [path for path in candidates if path != cold_directory and cold_directory not in path.parents]
     existing = [path for path in dict.fromkeys(candidates) if path.exists()]
     if not existing:
         return

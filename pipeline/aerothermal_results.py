@@ -23,7 +23,7 @@ def save_surface_energy(output, load, wall_history, all_temperatures, times, set
     integration is trapezoidal over exported physical substeps, including the
     nonzero incoming flux at the uniform initial state.
     """
-    count = len(load.xy)
+    count = int(np.count_nonzero(load.surface_active))
     times = np.r_[0., np.asarray(times, dtype=float)]
     flux_names = ("convective_heat_flux_into_solid_W_m2", "radiative_heat_flux_out_W_m2",
                   "net_heat_flux_into_solid_W_m2")
@@ -35,6 +35,7 @@ def save_surface_energy(output, load, wall_history, all_temperatures, times, set
     for number, row in enumerate(wall_history):
         step, node = divmod(number, count)
         identity = {name: row[name] for name in ("time_s", "surface_order_index", "x_m", "y_m", "wall_temperature_K")}
+        if "thermal_segment_active" in row:identity["thermal_segment_active"] = row["thermal_segment_active"]
         flux_rows.append({**identity, **dict(zip(flux_names, rates[step, node]))})
         energy_rows.append({**identity, **dict(zip(energy_names, energies[step, node]))})
         row.update(dict(zip(energy_names, map(float, energies[step, node]))))
