@@ -188,6 +188,8 @@ runs/comparison/
 
 Each nose gets normalized back → nose → back temperature profiles, wall and gas sample maps, optional CFD convergence curves, and separate Mechanical temperature fields and physical-time histories. Enable `visualization.make_gif` for an animation. Comparisons include equilibrium surface temperature versus sectional drag, solved transient wall/solid temperatures, local heat flux and accumulated energy, and global boundary power/energy. Local flux/energy comparison curves explicitly use simple means over saved wall samples; use global histories for spatially integrated heat input. Surface energy is calculated from the saved temperature-dependent load law using trapezoidal time integration; it is not a native internal-energy conservation certificate.
 
+Heat flux and accumulated heat load also have maximum/mean histories, final normalized surface profiles and boundary maps, separately showing convection, radiation and net heating. The maximum-temperature bar chart uses each nose's peak over all saved solid nodes and physical times, rather than only its final temperature. Run `study.py report --runs-dir runs` to regenerate these figures without Ansys; see [plot filenames and definitions](docs/aerodynamic_surface_load.md).
+
 Current reports verify mode, both calibration case/data pairs, boundary-package provenance and solid result hashes. Incompatible flight, gas, wall-radiation, mesh, material or exposure settings are excluded or separated. Existing steady RE plots retain equilibrium labels; new Mechanical surface histories are labeled as solved. Historical prescribed-surface/adiabatic plots are not relabeled as new solved-temperature results.
 
 Historical supplied CSVs remain available explicitly:

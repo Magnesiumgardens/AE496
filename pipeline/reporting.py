@@ -263,6 +263,7 @@ def _surface_load_history_outputs(cases, directory, colors=None):
     integrated power/energy and its documented boundary quadrature.
     """
     if not cases:return {}
+    from .surface_reporting import surface_quantity_outputs
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     plt = _plotting()
@@ -305,6 +306,7 @@ def _surface_load_history_outputs(cases, directory, colors=None):
         ax.grid(alpha=.3)
         ax.legend(fontsize=8)
         created[stem + "_png"] = _save(fig, directory / (stem + ".png"), plt)
+        created.update(surface_quantity_outputs(kind, fields, cases, summarized, directory, colors))
     raw = []
     global_fields = (
         ("convective_power_per_unit_span_W_m", "Convection into solid", "--"),
@@ -383,7 +385,7 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
                         aerodynamic=aerodynamic)
             _source_wall_plots(read_csv(raw), report_dir)
             if aerodynamic:
-                load_records = {}
+                load_records = {"nose_direction": cfg.get("reporting", {}).get("nose_direction", [1, 0])}
                 for kind, name in (("flux", "surface_heat_flux_history.csv"), ("energy", "surface_energy_history.csv"),
                                    ("global", "global_energy_history.csv")):
                     path = directory / "thermal_analysis" / name
@@ -490,6 +492,8 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
         ax.legend()
         ax.grid(alpha=.3)
         created["solid_temperature_history_comparison"] = _save(fig, output_dir / "solid_temperature_history_comparison.png", plt)
+        from .surface_reporting import peak_temperature_outputs
+        created.update(peak_temperature_outputs(solid_histories, output_dir, colors))
     created.update(create_trade_outputs(runs_dir, rows, output_dir))
     manifest = dict(status="complete" if not warnings else "partial", warnings=warnings,
                     wall_mean_definition="simple arithmetic mean of saved wall samples; not area weighted",
@@ -501,6 +505,8 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
                                             "Prescribed cases impose the steady CFD surface temperature as a step; their surface histories are constraints."),
                     surface_load_mean_definition="Simple arithmetic means of saved wall samples; use global histories for spatially integrated boundary power and energy.",
                     surface_energy_interpretation="Saved time-integrated net boundary energy is J/m² locally and J/m per unit span globally; it is not a volume-temperature average.",
+                    surface_load_plot_interpretation="Approximate signed convection, outward radiation and net loads from the saved thermal law; maps show boundary samples only. Normalized profiles omit the rear closure, while histories and global integrals retain it.",
+                    peak_temperature_definition="Maximum over every saved physical result set and all solid nodes, including the initial state; not the final-time maximum or a wall-only statistic.",
                     validated_unlabeled_wall_design=validated_raw_design,
                     outputs=created)
     manifest_path = output_dir / "report_manifest.json"

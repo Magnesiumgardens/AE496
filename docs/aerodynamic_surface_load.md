@@ -117,6 +117,37 @@ original wall samples, not exact boundary averages. Global histories retain
 the solver's spatial integration. Only current packages and result hashes
 are accepted by Mechanical reports.
 
+To regenerate the plots from saved results without launching Ansys:
+
+```powershell
+.\.venv\Scripts\python.exe study.py report --runs-dir runs
+```
+
+Each nose's `reports/` and the compatible comparison group under
+`runs/comparison/solid/` include:
+
+- `surface_heat_flux_max_mean_history.png` and
+  `surface_heat_load_max_mean_history.png`: maximum and simple wall-sample mean
+  versus physical time, with separate convection, radiation and net panels.
+- `final_surface_heat_flux_normalized_position.png` and
+  `final_surface_heat_load_normalized_position.png`: final surface profiles on
+  the same back → nose → back coordinate used for temperature comparisons.
+  Per-nose plots also include profiles versus physical wall distance.
+- `final_surface_heat_flux_maps.png` and `final_surface_heat_load_maps.png`:
+  boundary sample maps, with common color scales across noses for each
+  component. No interior flux or energy field is inferred from surface data.
+- The existing global power/energy histories distinguish W/m and J/m of span
+  from local W/m² and J/m². Heat load uses the saved time-integrated energy;
+  it is not final heat flux multiplied by exposure time. Signed cooling is
+  retained.
+
+`max_temperature_comparison.png` and its CSV compare the maximum solid
+temperature over **all saved physical times and all solid nodes**, including
+the initial state. The CSV includes the time of the peak and the exposure
+duration. This is not necessarily the final-time maximum. Wall-only historical
+data are not substituted for a missing all-solid history. Incompatible flow,
+material or duration settings continue to receive separate comparison groups.
+
 `solver_temperature_history.csv` remains indexed by Fluent convergence
 iteration. It is not physical time or an input to the transient solid solver.
 
