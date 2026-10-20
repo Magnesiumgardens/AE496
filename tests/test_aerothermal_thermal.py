@@ -13,6 +13,7 @@ from pipeline.aerothermal_loading import (AerothermalLoad, integrated_powers, pr
                                           read_load, validate_settings, STEFAN_BOLTZMANN)
 from pipeline.thermal import apply_surface_loads, save_results, solve_thermal
 from pipeline.thermal_loading import ThermalAnalysisError
+from test_thermal_radiation import SurfaceMeshAdapter
 
 
 def settings(duration=400., emissivity=.9):
@@ -72,15 +73,15 @@ class LoadPhysicsTests(unittest.TestCase):
             candidate = copy.deepcopy(ta); candidate["transient"]["duration_s"] = duration
             self.assertEqual(validate_settings(cfd, candidate)["duration"], duration)
 
-    def test_native_CONV_RAD_uses_positive_conductance_and_no_temperature_constraint(self):
+    def test_solid_convection_uses_positive_conductance_and_never_uses_unverified_line_RAD(self):
         load = load_fixture(); _, _, validated = settings()
         calls = []
         engine = SimpleNamespace(sfl=lambda *args: calls.append(args),
                                  d=lambda *args: self.fail("Aerodynamic load must never constrain TEMP"))
         apply_surface_loads(engine, [11, 12, 13, 14], load, validated)
-        self.assertEqual(len(calls), 8)
+        self.assertEqual(len(calls), 4)
         self.assertEqual(calls[0], (11, "CONV", 100., 100., 1500., 1500.))
-        self.assertEqual(calls[1], (11, "RAD", .9, .9, 3., 3.))
+        self.assertEqual([call[1] for call in calls], ["CONV"] * 4)
         # Native convention H*(Tbulk - Tsurface) adds heat into a colder solid.
         self.assertEqual(calls[0][2] * (calls[0][4] - 300.), 120000.)
 
@@ -153,30 +154,33 @@ class TransientResultsTests(unittest.TestCase):
                 self.assertIn("boundary_aerodynamic_source_W_m2", saved)
                 self.assertNotIn("boundary_prescribed_temperature_K", saved)
 
-    def test_native_transient_configuration_starts_uniform_and_never_issues_D_TEMP(self):
+    def test_native_transient_preserves_solid_initial_state_and_prevents_double_load_transfer(self):
         load = load_fixture([[0., 0.], [1., 0.], [0., 1.]])
         nnum, xyz = quadratic_boundary(load)
         _, _, validated = settings(duration=200.)
-        calls = []
-        class Engine:
-            mesh = SimpleNamespace(nnum=nnum, nodes=xyz, enum=np.arange(1, 2))
-            post_processing = SimpleNamespace(nsets=2, time_values=[2., 200.], nodal_temperature=lambda: np.full(6, 500.))
-            def __getattr__(self, name):
-                def command(*args, **kwargs):
-                    calls.append((name, args, kwargs))
-                    if name == "d": raise AssertionError("No TEMP constraint allowed")
-                    if name in {"k", "l"}: return sum(call[0] == name for call in calls)
-                    if name == "al": return 1
-                    return ""
-                return command
-        result = solve_thermal(Engine(), load, validated, .1)
+        engine = SurfaceMeshAdapter(nnum, xyz, lines=(1, 2, 3))
+        result = solve_thermal(engine, load, validated, .1)
+        calls = engine.calls
         self.assertEqual(result[3], [2., 200.])
         self.assertIn(("tunif", (300.,), {}), calls)
         self.assertIn(("time", (200.,), {}), calls)
         self.assertIn(("deltim", (1., .1, 10.), {}), calls)
         self.assertTrue(any(name == "sfl" and args[1] == "CONV" for name, args, kwargs in calls))
-        self.assertTrue(any(name == "sfl" and args[1] == "RAD" for name, args, kwargs in calls))
-        self.assertFalse(any(name == "d" for name, args, kwargs in calls))
+        self.assertFalse(any(name == "sfl" and args[1] == "RAD" for name, args, kwargs in calls))
+        constraints = [args for name, args, kwargs in calls if name == "d"]
+        self.assertEqual(constraints, [(7, "TEMP", 3.)])
+        self.assertNotIn(constraints[0][0], nnum)
+        self.assertEqual(result[0].tolist(), nnum.tolist())
+        self.assertTrue(all(len(values) == len(nnum) for values in result[2]))
+        self.assertTrue(all(np.min(values) == 500. for values in result[2]))
+        solve_index = next(index for index, (name, _, _) in enumerate(calls) if name == "solve")
+        # MAPDL automatically transfers selected solid-model line loads again
+        # at SOLVE. The overlay must not receive a second convection load.
+        selection_commands = [(name, args) for name, args, _ in calls[:solve_index]
+                              if name in {"lsel", "allsel"}]
+        self.assertEqual(selection_commands[-1], ("lsel", ("NONE",)))
+        self.assertIn(("tintp", (), {"theta": 1.}), calls)
+        self.assertIn(("lumpm", ("OFF",), {}), calls)
 
 
 if __name__ == "__main__": unittest.main()

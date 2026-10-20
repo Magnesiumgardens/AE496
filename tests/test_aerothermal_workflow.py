@@ -1,6 +1,6 @@
 """Engine-free integration of RE CFD, cold calibration and transient surface loads.
 
-Native solver execution is replaced by deterministic fields.  Export matching,
+Native solver execution is replaced by an energy-consistent lumped surrogate. Export matching,
 source hashes, orchestration resume, and the saved Mechanical result contract
 are exercised through the application functions.
 """
@@ -18,7 +18,7 @@ from pipeline.aero import aerodynamic_summary
 from pipeline.config import load_config
 from pipeline.study import BatchError, run_case
 from pipeline.temperature_export import export_temperatures, temperature_conditions, temperature_paths
-from pipeline.thermal import run_thermal_analysis
+from pipeline.thermal import AEROTHERMAL_MODEL_VERSION, run_thermal_analysis
 from pipeline.utils import atomic_json, file_sha256
 from test_adiabatic_study import field_solver
 from test_nose_trade import fluent
@@ -121,22 +121,48 @@ class AerothermalWorkflowTests(unittest.TestCase):
             thermal_config = command[command.index("--thermal-config") + 1]
 
             def solve(engine, load, settings, size):
-                from pipeline.aerothermal_loading import prepare_boundary_quadrature
+                from scipy.optimize import brentq
+                from pipeline.aerothermal_loading import prepare_boundary_quadrature, integrated_powers
+                from pipeline.thermal_energy import prepare_solid_energy
                 self.assertEqual(load.mode, "aerodynamic_surface_load")
                 self.assertTrue(settings["include_rad"])
                 count = len(load.xy)
                 midpoints = (load.xy + np.roll(load.xy, -1, axis=0)) / 2
-                xy = np.vstack([load.xy, midpoints, load.xy.mean(axis=0)])
+                center = load.xy.mean(axis=0)
+                radial_midpoints = (load.xy + center) / 2
+                xy = np.vstack([load.xy, midpoints, center, radial_midpoints])
                 xyz = np.c_[xy, np.zeros(len(xy))]
                 ids = np.arange(1, len(xy) + 1)
+                center_index = 2 * count
+                radial_start = center_index + 1
+                triangles = np.asarray([
+                    [index, (index + 1) % count, center_index,
+                     count + index, radial_start + (index + 1) % count, radial_start + index]
+                    for index in range(count)], dtype=int) + 1
+                load.solid_energy_quadrature = prepare_solid_energy(ids, xyz, triangles)
+                load.radiation_boundary = dict(formulation="SURF151", status="configured")
                 selected = SimpleNamespace(mesh=SimpleNamespace(nnum=ids[:2 * count]),
                                            lsel=lambda *a: None, nsll=lambda *a: None,
                                            allsel=lambda: None)
                 prepare_boundary_quadrature(selected, range(1, count + 1), load, ids, xyz, size)
-                # Synthetic engine outputs deliberately warm every surface point
-                # gradually; none is constrained to the 1800--2200 K CFD field.
-                values = [np.full(len(ids), 400.), np.full(len(ids), 500.)]
-                return ids, xyz, values, [2., settings["duration"]], 4
+                # Infinite-conductivity limit with finite solid heat capacity:
+                # solve the scalar backward-Euler energy equation independently
+                # at each physical step. This is a workflow fixture, not a
+                # replacement for native spatial MAPDL radiation validation.
+                capacity = settings["rho"] * settings["cp"] * load.solid_energy_quadrature.area_m2
+                times = [2., settings["duration"]]
+                previous_time, previous_temperature = 0., settings["initial_t"]
+                values = []
+                for time in times:
+                    dt = time - previous_time
+                    def residual(temperature):
+                        net_power = integrated_powers(load, np.full(len(ids), temperature), settings)[2]
+                        return capacity * (temperature - previous_temperature) - dt * net_power
+                    temperature = brentq(residual, previous_temperature, float(load.gas_temperature.max()),
+                                         xtol=1e-10, rtol=1e-12)
+                    values.append(np.full(len(ids), temperature))
+                    previous_time, previous_temperature = time, temperature
+                return ids, xyz, values, times, len(triangles)
 
             with patch("ansys.mapdl.core.launch_mapdl", return_value=SimpleNamespace(exit=lambda: None)), \
                     patch("pipeline.thermal.solve_thermal", side_effect=solve):
@@ -190,7 +216,7 @@ class AerothermalWorkflowTests(unittest.TestCase):
         paths = calibration_paths(load_config(self.path))
         self.assertNotEqual(self.pair_hashes(), self.pair_hashes(paths["cold_work"]))
         summary = json.loads((self.work / "thermal_analysis/thermal_summary.json").read_text())
-        self.assertEqual(summary["model_version"], "6.0-aerodynamic-surface-load")
+        self.assertEqual(summary["model_version"], AEROTHERMAL_MODEL_VERSION)
         self.assertEqual(summary["loading_mode"], "aerodynamic_surface_load")
         self.assertEqual(summary["analysis"]["duration_s"], 200)
         self.assertIsNotNone(summary["net_heat_load_per_unit_span_J_m"])
@@ -200,7 +226,12 @@ class AerothermalWorkflowTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertNotIn("prescribed_surface_temperature_K", rows[0])
         self.assertEqual({float(row["wall_temperature_K"]) for row in rows if float(row["time_s"]) == 0}, {300.})
-        self.assertEqual({float(row["wall_temperature_K"]) for row in rows if float(row["time_s"]) == 2}, {400.})
+        early = [float(row["wall_temperature_K"]) for row in rows if float(row["time_s"]) == 2]
+        self.assertTrue(all(300. < temperature < 1800. for temperature in early))
+        self.assertEqual(summary["energy_balance"]["status"], "passed")
+        self.assertTrue(summary["energy_balance"]["native_internal_energy_balance_verified"])
+        for name in ("energy_balance.json", "solid_energy_history.csv"):
+            self.assertIn(name, summary["result_sha256"])
         self.calls.clear()
         result = self.study()
         self.assertEqual(self.calls, [])
@@ -228,6 +259,43 @@ class AerothermalWorkflowTests(unittest.TestCase):
             self.assertEqual(file_sha256(self.work / name), digest)
         summary = json.loads((self.work / "thermal_analysis/thermal_summary.json").read_text())
         self.assertEqual(summary["analysis"]["duration_s"], 400)
+
+    def test_thermal_model_revision_only_reruns_mechanical_and_preserves_all_cfd_sources(self):
+        # Retain an otherwise complete saved run under an earlier thermal
+        # implementation version. The physical inputs and source files are
+        # identical; only the code's thermal model receipt changes.
+        previous_model = "6.0-aerodynamic-surface-load"
+        with patch("pipeline.thermal.AEROTHERMAL_MODEL_VERSION", previous_model), \
+             patch("pipeline.mechanical_reporting.AEROTHERMAL_MODEL_VERSION", previous_model):
+            self.study()
+        state_path = self.work / "_batch/stage_state.json"
+        previous_state = json.loads(state_path.read_text())
+        previous_summary = json.loads((self.work / "thermal_analysis/thermal_summary.json").read_text())
+        self.assertEqual(previous_summary["model_version"], previous_model)
+        preserved = {name: file_sha256(self.work / name) for name in (
+            "02_mesh.msh.h5", "04_final.cas.h5", "04_final.dat.h5", "aero_summary.json",
+            "thermal_bc/surface_load_nodes.csv", "thermal_bc/surface_load_summary.json",
+            "cfd/cold_calibration/04_final.cas.h5", "cfd/cold_calibration/04_final.dat.h5")}
+        config_hashes = {str(path): file_sha256(path) for path in (self.path, self.thermal)}
+        self.calls.clear()
+        result = self.study()
+        self.assertEqual(self.calls, ["run_thermal_analysis.py"])
+        self.assertEqual(result["stages"]["thermal"], "executed")
+        self.assertEqual({name for name, status in result["stages"].items() if status == "reused"},
+                         {"mesh", "solver", "temperature_export", "aero", "calibration"})
+        for name, digest in preserved.items():
+            self.assertEqual(file_sha256(self.work / name), digest, name)
+        for path, digest in config_hashes.items():
+            self.assertEqual(file_sha256(path), digest, path)
+        current_state = json.loads(state_path.read_text())
+        self.assertNotEqual(previous_state["stages"]["thermal"]["fingerprint"],
+                            current_state["stages"]["thermal"]["fingerprint"])
+        for stage in ("mesh", "solver", "temperature_export", "aero", "calibration"):
+            self.assertEqual(previous_state["stages"][stage]["fingerprint"],
+                             current_state["stages"][stage]["fingerprint"], stage)
+        current_summary = json.loads((self.work / "thermal_analysis/thermal_summary.json").read_text())
+        self.assertEqual(current_summary["model_version"], AEROTHERMAL_MODEL_VERSION)
+        self.assertEqual(current_summary["energy_balance"]["status"], "passed")
 
     def test_cold_wall_temperature_change_leaves_primary_re_and_aero_unchanged(self):
         self.study()

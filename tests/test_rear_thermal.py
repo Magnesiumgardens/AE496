@@ -69,7 +69,7 @@ class RearThermalTests(unittest.TestCase):
         engine = SimpleNamespace(sfl=lambda *args: calls.append(args))
         apply_surface_loads(engine, [11, 12, 13, 14, 15], load, validated)
         self.assertEqual({call[0] for call in calls}, {11, 12, 13})
-        self.assertEqual([call[1] for call in calls], ["CONV", "RAD"] * 3)
+        self.assertEqual([call[1] for call in calls], ["CONV"] * 3)
         np.testing.assert_array_equal(load.surface_active, [True, True, True, True, False])
         self.assertEqual(load.gas_temperature[-1], 0.)
 

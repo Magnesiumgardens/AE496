@@ -250,7 +250,9 @@ class ThermalExecutionTests(unittest.TestCase):
             self.assertIn(("solve", True), engine.calls)
             self.assertIn(("exit",), engine.calls)
             self.assertNotIn(("nsets",), engine.calls)
-            self.assertFalse((case.work / "thermal_analysis/thermal_summary.json").exists())
+            receipt = json.loads((case.work / "thermal_analysis/thermal_summary.json").read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertIn("MAPDL solve failed", receipt["error"])
 
 
 if __name__ == "__main__":

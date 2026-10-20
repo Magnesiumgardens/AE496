@@ -19,7 +19,7 @@ from .trade_study import thermal_screening_metrics
 MODEL_VERSION = "3.0-temperature-convection"
 ENDPOINT_MODEL_VERSION = "4.0-endpoint-convection"
 PRESCRIBED_MODEL_VERSION = "5.0-prescribed-temperature"
-AEROTHERMAL_MODEL_VERSION = "6.0-aerodynamic-surface-load"
+AEROTHERMAL_MODEL_VERSION = "7.0-surf151-aerodynamic-surface-load"
 STEFAN_BOLTZMANN = 5.670374419e-8
 
 
@@ -240,8 +240,8 @@ def apply_surface_loads(mapdl, lines, load, settings):
                       float(driving_temperature[index]), float(driving_temperature[next_index]))
         else:  # Historical direct-flux utilities, never selected by the new runner.
             mapdl.sfl(line, "HFLUX", float(load.cold_flux[index]), float(load.cold_flux[next_index]))
-        if settings["include_rad"]:
-            mapdl.sfl(line, "RAD", settings["emissivity"], settings["emissivity"], settings["trad"], settings["trad"])
+        # PLANE293 convection/flux loads transfer here. Radiation is added on
+        # separate SURF151 elements after the solid mesh has been generated.
 
 
 def apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size):
@@ -318,18 +318,28 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     if len(nnum) < 3 or n_elements < 1:
         raise ThermalAnalysisError("MAPDL generated an empty thermal mesh.")
     _progress(f"Mesh complete: {len(nnum)} nodes / {n_elements} elements")
+    aerodynamic = load.mode == "aerodynamic_surface_load"
+    if aerodynamic:
+        from .thermal_energy import normalize_solid_connectivity, prepare_solid_energy
+        triangles = normalize_solid_connectivity(nnum, xyz, mapdl.mesh.elem)
+        load.solid_energy_quadrature = prepare_solid_energy(nnum, xyz, triangles)
     if load.mode == "prescribed_temperature":
         _progress("Mapping the prescribed surface-temperature field onto the solid mesh")
         apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size)
-    elif load.mode == "aerodynamic_surface_load":
+    if aerodynamic or settings["include_rad"]:
         from .aerothermal_loading import prepare_boundary_quadrature
         count = prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size)
-        _progress(f"Implicit temperature-dependent gas heating plus radiation on {count} solved boundary nodes; no TEMP constraints")
+    if settings["include_rad"]:
+        from .thermal_radiation import add_radiation_surfaces
+        load.radiation_boundary = add_radiation_surfaces(mapdl, lines, load, nnum, xyz, settings)
+        _progress(f"Created {load.radiation_boundary['surface_elements']} SURF151 radiation elements on {count} exposed solid nodes; only the separate ambient node is temperature-constrained")
     mapdl.finish()
     mapdl.slashsolu()
     mapdl.antype("TRANS")
     mapdl.trnopt("FULL")
     mapdl.timint("ON", "THERM")
+    mapdl.tintp(theta=1.)  # Backward Euler; endpoint power in the energy check.
+    mapdl.lumpm("OFF")  # Retain the solid element's default capacity formulation.
     mapdl.tunif(settings["initial_t"])
     mapdl.kbc(1)
     mapdl.autots("ON")
@@ -337,6 +347,11 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     mapdl.deltim(settings["dt0"], settings["dtmin"], settings["dtmax"])
     mapdl.outres("ALL", "ALL")
     mapdl.neqit(100)
+    if settings["include_rad"]:
+        # SOLVE automatically transfers solid-model loads on SELECTED lines.
+        # CONV was already transferred to PLANE293 before adding SURF151.
+        # Prevent transferring it a second time onto the radiation overlay.
+        mapdl.lsel("NONE")
     _progress(f"Solving {len(nnum)} nodes / {n_elements} elements for {settings['duration']:g} s; streaming MAPDL output")
     message = str(mapdl.solve(verbose=True))
     if "*** ERROR ***" in message.upper():
@@ -353,6 +368,9 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     temperatures = []
     for number in range(1, nsets + 1):
         mapdl.set(1, number)  # single transient load step
+        if settings["include_rad"]:
+            from .thermal_radiation import select_solid_results
+            select_solid_results(mapdl, nnum)
         temperatures.append(np.asarray(mapdl.post_processing.nodal_temperature(), dtype=float).copy())
         if number % 10 == 0 or number == nsets:
             _progress(f"Read result set {number}/{nsets}; physical time={float(times[number - 1]):g} s")
@@ -435,10 +453,23 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         raise ThermalAnalysisError(f"MAPDL launch failed: {exc}. Native startup logs are in {output}") from exc
     _progress("Mechanical APDL connected")
     try:
+        # A failed rerun must not leave a previous complete receipt eligible
+        # for comparison while native/result files are being replaced.
+        atomic_json(output / "thermal_summary.json", dict(status="running", loading_mode=load.mode))
         nnum, xyz, temperatures, times, n_elements = solve_thermal(mapdl,load,settings,mesh_size)
         _progress("Saving thermal histories and final node temperatures")
         history, snapshots, final, net_heat = save_results(output,load,nnum,xyz,temperatures,times,
             settings,mesh_size,ta_cfg.get("visualization",{}).get("max_animation_frames",60))
+        if aerodynamic:
+            balance = getattr(load, "energy_balance", {})
+            if balance.get("status") != "passed":
+                atomic_json(output / "thermal_summary.json", dict(status="failed", loading_mode=load.mode,
+                            model_version=AEROTHERMAL_MODEL_VERSION, energy_balance=balance,
+                            radiation_boundary=getattr(load, "radiation_boundary", {})))
+                raise ThermalAnalysisError(f"Stored solid energy does not match convection minus radiation. "
+                    f"Results retained for diagnosis in {output}; inspect energy_balance.json and solid_energy_history.csv. "
+                    "The analysis is not eligible for comparison.")
+            _progress(f"Stored-energy balance passed across {balance['solved_substeps_checked']} physical substeps")
         viz = dict(ta_cfg.get("visualization",{}), save_heat_flux_image=False)
         if prescribed or aerodynamic:
             viz["loading_mode"] = load.mode
@@ -446,11 +477,11 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         _progress("Generating thermal plots")
         figures = create_thermal_visualizations(output,load.xy,np.zeros(len(load.xy)),xyz,history,snapshots,viz)
         loading_limits = (["Gas-side heating is an affine wall-temperature law calibrated from cold-wall and radiative-equilibrium CFD states; no surface temperature is prescribed.",
-                           "MAPDL evaluates native CONV and RAD loads at the current solved boundary temperature within each nonlinear thermal iteration.",
+                           "MAPDL evaluates native PLANE293 convection and attached SURF151 radiation at the current solved boundary temperature within each nonlinear thermal iteration.",
                            "H and effective driving temperature are each linearly interpolated on each reconstructed straight boundary line; their product need not equal a linearly interpolated affine source between vertices.",
                            "The affine law is extrapolated without clipping outside its two-state calibration temperature range; the effective driving temperature is not a directly sampled CFD gas temperature.",
                            "Boundary energies use quadratic FE boundary-temperature interpolation and five-point spatial Gaussian quadrature, then trapezoidal integration over physical saved substeps.",
-                           "Integrated surface energy is an independent postprocessed heat input, not a native constraint reaction or verified global internal-energy balance."] if aerodynamic else
+                           "Stored solid energy is independently integrated over every quadratic solid element and checked against backward-Euler endpoint surface powers at every physical substep; native constraint reactions are not used."] if aerodynamic else
                           ["The steady CFD radiative-equilibrium wall temperature is prescribed on every Mechanical boundary node.",
                            "The surface temperature steps to the imported field at t=0+ and remains fixed; only the interior temperature response is predicted.",
                            "No convection coefficient or boundary heat flux is inferred; prescribed-temperature reaction heat is not exported.",
@@ -461,7 +492,7 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
         result_names = ["wall_temperature_history.csv", "thermal_nodes_final.csv", "temperature_history.csv"]
         if aerodynamic:
             result_names += ["surface_heat_flux_history.csv", "surface_energy_history.csv", "global_energy_history.csv",
-                             "thermal_snapshots.npz", "wall_temperature_final.csv"]
+                             "thermal_snapshots.npz", "wall_temperature_final.csv", "solid_energy_history.csv", "energy_balance.json"]
         summary = dict(status="complete", model_version=AEROTHERMAL_MODEL_VERSION if aerodynamic else PRESCRIBED_MODEL_VERSION if prescribed else ENDPOINT_MODEL_VERSION if endpoint else MODEL_VERSION,
             loading_mode="aerodynamic_surface_load" if aerodynamic else "prescribed_temperature" if prescribed else "convective_from_cfd" if endpoint else "convection",
             backend="Mechanical APDL", material=ta_cfg["material"], analysis={**ta_cfg["transient"], "initial_temperature_k":settings["initial_t"]},
@@ -493,7 +524,9 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
                            surface_load_derivation=metadata["derivation"],
                            surface_load_diagnostics=metadata["diagnostics"],
                            source_surface_scope=metadata.get("thermal_scope", {}),
-                           boundary_temperature_application="solved_with_implicit_CONV_and_RAD",
+                           boundary_temperature_application="solved_with_CONV_and_SURF151_radiation",
+                           radiation_boundary=load.radiation_boundary,
+                           energy_balance=load.energy_balance,
                            temperature_history_sampling="solved_wall_vertices_and_all_solid_nodes",
                            initial_state="uniform initial temperature; finite surface heating begins at t=0",
                            heat_transfer_status="postprocessed_temperature_dependent_convective_and_radiative_fluxes",
@@ -506,7 +539,9 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
                                           "global_space": "5_point_Gaussian_quadrature_on_all_quadratic_FE_boundary_edges",
                                           "global_time": "trapezoid_over_saved_physical_substeps_including_initial_flux",
                                           "units_local": "J/m2", "units_global": "J/m_per_unit_span",
-                                          "native_internal_energy_balance_verified": False})
+                                          "conservation_time": "backward_Euler_endpoint_power_at_every_native_substep",
+                                          "solid_internal_energy_balance_verified": True,
+                                          "native_reaction_heat_flow_exported": False})
         if endpoint:
             summary.update(convection_package_sha256=package_sha256,
                            convection_conditions=metadata["conditions"],
@@ -525,6 +560,11 @@ def run_thermal_analysis(run_dir=None, cfd_config="config.yaml", thermal_config=
             description = coefficient_description + " W/(m² K)"
         print(f"[thermal] Complete: {output}; duration={settings['duration']:g} s; {description}")
         return summary
+    except Exception as exc:
+        receipt = json.loads((output / "thermal_summary.json").read_text(encoding="utf-8"))
+        receipt.update(status="failed", error=str(exc))
+        atomic_json(output / "thermal_summary.json", receipt)
+        raise
     finally:
         _progress("Closing Mechanical APDL")
         mapdl.exit()

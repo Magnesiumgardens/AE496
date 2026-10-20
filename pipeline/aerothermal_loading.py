@@ -1,8 +1,8 @@
 """Finite, wall-temperature-dependent heating calibrated from two wall states.
 
 The fitted incoming law is ``q_conv = source - H * T_wall``.  MAPDL's native
-CONV load evaluates that feedback implicitly, and RAD evaluates surface cooling
-at the current solved temperature.  No temperature constraint is used.
+CONV load evaluates that feedback implicitly, and SURF151 evaluates surface
+cooling at the current solved temperature. No solid temperature is constrained.
 """
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def validate_settings(cfd_cfg, cfg):
             raise ThermalAnalysisError(f"CFD must define a finite {name} for the equilibrium anchor.") from exc
         if not np.isfinite(expected) or not np.isclose(actual, expected, rtol=1e-10, atol=1e-12):
             raise ThermalAnalysisError(f"Mechanical {name} must match the CFD radiation-equilibrium calibration ({expected}).")
-    settings.update(loading_mode="aerodynamic_surface_load", boundary_application="implicit_CONV_plus_RAD",
+    settings.update(loading_mode="aerodynamic_surface_load", boundary_application="implicit_CONV_plus_SURF151_radiation",
                     temperature_history_sampling="solved_solid_temperature", calibration_model="affine_two_wall_states")
     from .aerothermal_calibration import calibration_settings
     selection = calibration_settings(cfd_cfg)
@@ -144,8 +144,9 @@ def prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size):
     This is an independent boundary integral, not native heat-reaction output.
     """
     mapdl.lsel("NONE")
+    segment_active = getattr(load, "segment_active", np.ones(len(lines), dtype=bool))
     for index, line in enumerate(lines):
-        if load.segment_active[index]:mapdl.lsel("A", "LINE", "", int(line))
+        if segment_active[index]:mapdl.lsel("A", "LINE", "", int(line))
     mapdl.nsll("S", 1)
     selected = np.asarray(mapdl.mesh.nnum, dtype=int).copy()
     mapdl.allsel()
@@ -164,7 +165,7 @@ def prepare_boundary_quadrature(mapdl, lines, load, nnum, xyz, mesh_size):
     quadrature = []
     covered = set()
     for segment, start in enumerate(load.xy):
-        if not load.segment_active[segment]:continue
+        if not segment_active[segment]:continue
         vector = load.xy[(segment + 1) % len(load.xy)] - start
         length = float(np.linalg.norm(vector))
         fraction = (selected_xy - start) @ vector / length**2

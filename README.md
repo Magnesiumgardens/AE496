@@ -29,9 +29,9 @@ q_conv(s,Tw) = B(s) − H(s) × Tw
 q_net(s,Tw) = q_conv(s,Tw) − epsilon × sigma × (Tw⁴ − T_rad⁴)
 ```
 
-Mechanical **solves both the surface and interior temperature**, starting uniformly at 300 K. Native `CONV` and `RAD` loads evaluate convection and radiation from the current solved surface temperature during nonlinear thermal iterations. No `D,TEMP` surface constraint is applied in this mode. The equivalent convection driving temperature `B/H` is a fitted parameter, **not a sampled gas temperature or measured adiabatic recovery temperature**. `H` is spatially varying but stays constant in time; the heat flux changes with wall temperature.
+Mechanical **solves both the surface and interior temperature**, starting uniformly at 300 K. Native `CONV` loads on `PLANE293` solids and attached `SURF151` radiation elements evaluate heating and cooling from the current solved surface temperature. No solid node receives a `D,TEMP` constraint; only a separate surroundings node is held at the configured ambient temperature. That node is excluded from solid outputs. The equivalent convection driving temperature `B/H` is a fitted parameter, **not a sampled gas temperature or measured adiabatic recovery temperature**. `H` is spatially varying but stays constant in time; the heat flux changes with wall temperature.
 
-This replaces the previous prescribed-temperature coupling, which remains an explicitly selectable compatibility mode. The radiation calculation in CFD identifies the equilibrium calibration anchor; radiation is also evaluated in the solid energy balance, not transferred twice as a net CFD load. See [the implementation and assumptions](docs/aerodynamic_surface_load.md).
+This replaces the previous prescribed-temperature coupling, which remains an explicitly selectable compatibility mode. The radiation calculation in CFD identifies the equilibrium calibration anchor; radiation is also evaluated in the solid energy balance, not transferred twice as a net CFD load. Stored solid energy must agree with the net applied heating at every physical substep before the result can enter comparison. Older thermal results require a thermal-only rerun; see [the radiation correction and rerun commands](docs/radiation_fix.md) and [the implementation and assumptions](docs/aerodynamic_surface_load.md).
 
 ## Update and run on Windows
 

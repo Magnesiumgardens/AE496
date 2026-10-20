@@ -172,7 +172,7 @@ class SpatialMechanicalTests(unittest.TestCase):
         self.assertEqual(convection, [(11, 'CONV', 10., 20., 2000., 2200.),
                                       (12, 'CONV', 20., 30., 2200., 2400.),
                                       (13, 'CONV', 30., 10., 2400., 2000.)])
-        self.assertEqual(len([call for call in calls if call[1] == 'RAD']), 3)
+        self.assertFalse(any(call[1] == 'RAD' for call in calls))  # Added later as SURF151.
         np.testing.assert_allclose(load.incoming_flux([300, 1000, 2000]), [17000, 24000, 12000])
 
     def test_spatial_coefficients_remain_attached_when_polygon_orientation_changes(self):

@@ -11,6 +11,7 @@ from pipeline.mechanical_reporting import mechanical_complete
 from pipeline.reporting import (create_comparison_outputs, create_thermal_visualizations,
                                 read_csv, write_csv, _surface_load_history_outputs)
 from pipeline.thermal_loading import ThermalAnalysisError
+from pipeline.thermal import AEROTHERMAL_MODEL_VERSION
 from pipeline.utils import atomic_json, file_sha256
 
 
@@ -43,6 +44,11 @@ def saved_aerothermal(work):
     write_csv(output / "surface_heat_flux_history.csv", flux)
     write_csv(output / "surface_energy_history.csv", energy)
     write_csv(output / "global_energy_history.csv", global_energy)
+    write_csv(output / "solid_energy_history.csv", [
+        dict(time_s=row["time_s"], stored_energy_change_per_unit_span_J_m=row["cumulative_net_energy_per_unit_span_J_m"])
+        for row in global_energy])
+    balance = dict(status="passed", time_integration="backward_euler", relative_tolerance=.02)
+    atomic_json(output / "energy_balance.json", balance)
     write_csv(output / "wall_temperature_final.csv", wall[-len(xy):])
     write_csv(output / "temperature_history.csv", [dict(time_s=t, minimum_K=300+t/2,
         mean_K=300+t*.8, maximum_K=300+t*1.03) for t in (0,100,200)])
@@ -51,12 +57,14 @@ def saved_aerothermal(work):
     np.savez_compressed(output / "thermal_snapshots.npz", boundary_xy_m=np.asarray(xy),
         coordinates_m=np.c_[xy,np.zeros(len(xy))],time_s=np.array([0.,100.,200.]),
         temperatures_K=np.array([[300+t*(1+.01*i) for i in range(len(xy))] for t in (0.,100.,200.)]))
-    summary = dict(status="complete", model_version="6.0-aerodynamic-surface-load",
+    summary = dict(status="complete", model_version=AEROTHERMAL_MODEL_VERSION,
                    loading_mode="aerodynamic_surface_load", material={"name":"Tungsten"},
                    analysis={"duration_s":200,"initial_temperature_k":300},
                    settings={"loading_mode":"aerodynamic_surface_load","duration":200},
                    final_temperature={"maximum_K":506,"mean_K":460},
-                   result_sha256={path.name:file_sha256(path) for path in output.iterdir() if path.suffix in {".csv",".npz"}})
+                   energy_balance=balance,
+                   radiation_boundary=dict(formulation="SURF151", status="configured"),
+                   result_sha256={path.name:file_sha256(path) for path in output.iterdir() if path.suffix in {".csv",".npz",".json"}})
     atomic_json(output / "thermal_summary.json", summary)
     return summary
 

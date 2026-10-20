@@ -51,4 +51,12 @@ def save_surface_energy(output, load, wall_history, all_temperatures, times, set
     write_csv(output / "surface_heat_flux_history.csv", flux_rows)
     write_csv(output / "surface_energy_history.csv", energy_rows)
     write_csv(output / "global_energy_history.csv", global_rows)
+    quadrature = getattr(load, "solid_energy_quadrature", None)
+    if quadrature is not None:
+        from .thermal_energy import evaluate_energy_balance
+        from .utils import atomic_json
+        solid_rows, balance = evaluate_energy_balance(quadrature, times, all_temperatures, powers, settings)
+        write_csv(output / "solid_energy_history.csv", solid_rows)
+        atomic_json(output / "energy_balance.json", balance)
+        load.energy_balance = balance
     return float(global_energy[-1, 2])

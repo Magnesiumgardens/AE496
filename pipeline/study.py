@@ -91,7 +91,11 @@ def stage_fingerprint(stage, cfg, thermal_cfg, outputs):
     values = {key: copy.deepcopy(cfg.get(key, {})) for key in keys}
     if "geometry" in values:
         values["geometry"].pop("input_file", None)
-    if stage == "thermal":values["mechanical"] = thermal_cfg
+    if stage == "thermal":
+        from .thermal import AEROTHERMAL_MODEL_VERSION
+        values["mechanical"] = thermal_cfg
+        if thermal_cfg.get("loading", {}).get("mode") == "aerodynamic_surface_load":
+            values["mechanical_model_version"] = AEROTHERMAL_MODEL_VERSION
     if stage == "aero":
         from .aero import MODEL_VERSION
         values["export_model_version"] = MODEL_VERSION

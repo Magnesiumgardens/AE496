@@ -44,12 +44,17 @@ independently measured gas temperature.
 
 ## Mechanical implementation
 
-`pipeline/aerothermal_loading.py` supplies native MAPDL `CONV` and `RAD`
-loads on the selected edges of the reconstructed closed polygon. `H` and `B/H` are each linearly
+`pipeline/aerothermal_loading.py` supplies native MAPDL `CONV` loads on the
+`PLANE293` solid edges; `pipeline/thermal_radiation.py` attaches dedicated
+`SURF151` radiation elements to the same exposed quadratic edges. `H` and `B/H` are each linearly
 interpolated along each boundary segment; their product need not be a linear
 interpolation of `B`. Native nonlinear iterations evaluate both loads using
-the current FE surface temperature. No `D,TEMP` condition is applied in this
-mode, and cold-wall flux is not held fixed throughout exposure.
+the current FE surface temperature. No solid node receives a `D,TEMP` condition.
+Only the separate ambient node is held at the surroundings temperature; it has
+no solid heat capacity and is excluded from solid statistics and result files.
+Cold-wall flux is not held fixed throughout exposure. Line loads are transferred
+before creating radiation surfaces, then deselected before `SOLVE` to prevent
+automatic convection transfer onto the radiation elements.
 
 The initial temperature is uniform 300 K by default. Full transient
 conduction uses PLANE293 thermal elements, automatic time stepping and the
@@ -108,7 +113,14 @@ including the finite heat flux at the initial uniform temperature. The
 initial cumulative energy is zero. Global powers use five-point Gaussian
 quadrature on all selected quadratic FE boundary edges, followed by the
 same temporal integration. They are an independent postprocessed boundary
-integral, not a native MAPDL internal-energy or reaction-flux verification.
+integral. A separate `solid_energy_history.csv` integrates the actual quadratic
+solid-element temperatures and compares stored-energy change with net surface
+input at every native physical substep. `energy_balance.json` must pass before
+the analysis is marked complete or eligible for comparison. Conservation uses
+backward-Euler endpoint powers to match the explicit MAPDL `THETA=1` setting;
+trapezoidal reporting integrals are retained separately. Native reaction heat
+flows are not exported. See [the radiation correction](radiation_fix.md) for
+the numerical tolerance, provenance changes, and thermal-only rerun commands.
 
 Per-nose `reports/` and `runs/comparison/solid/` contain solved wall-temperature
 curves, final wall/solid plots, local flux and energy histories and global
