@@ -522,6 +522,9 @@ def create_comparison_outputs(runs_dir, rows, output_dir, reference_dir=None, ca
     created.update(_wall_plots(histories, profiles, output_dir, colors=colors, prescribed=prescribed_comparison,
                               aerodynamic=bool(current_names) and current_names <= aerodynamic_cases))
     created.update(_surface_load_history_outputs(surface_load_histories, output_dir, colors))
+    if surface_load_histories:
+        from .thermal_drag_reporting import thermal_drag_outputs
+        created.update(thermal_drag_outputs(runs_dir, surface_load_histories, output_dir, colors))
     if solid_histories:
         fig, ax = plt.subplots(figsize=(10, 5))
         for name, records in solid_histories.items():

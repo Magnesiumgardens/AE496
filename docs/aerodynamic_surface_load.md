@@ -175,6 +175,19 @@ outgoing radiative and signed net energy. Both bar charts and their CSVs are
 written to each nose's `reports/` and the compatible comparison folder when
 the corresponding saved data exist. Negative net cooling remains negative.
 
+The compatible solid comparison folder also contains two labeled scatter
+plots and their CSVs: `final_heat_load_vs_drag.png` uses final accumulated net
+boundary energy in J/m of span, and `peak_heat_flux_vs_drag.png` uses the peak
+net local surface heat flux over all saved times and analyzed wall points in
+W/m². Both use total sectional drag in N/m of span on the horizontal axis.
+Flux peaks include the initial state. The heat-load definition matches the
+existing final heat-load bars. Cases are paired by name and must have current
+thermal and aerodynamic results from the same saved CFD case/data pair.
+`thermal_drag_pairing.csv` records included cases and exclusion reasons.
+An × marker identifies points with unverified or failed drag/residual screens;
+these plots do not select an optimal geometry or claim a Pareto frontier.
+Run `study.py report --runs-dir runs` to regenerate them without running Ansys.
+
 `solver_temperature_history.csv` remains indexed by Fluent convergence
 iteration. It is not physical time or an input to the transient solid solver.
 

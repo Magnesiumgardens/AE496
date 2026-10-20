@@ -73,7 +73,14 @@ class AerothermalReportTests(unittest.TestCase):
     def test_solved_wall_histories_and_load_energy_reports_are_regenerated(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ("blunt", "sharp"):saved_aerothermal(root / name)
+            for name, drag in (("blunt", 123.), ("sharp", 456.)):
+                summary = saved_aerothermal(root / name)
+                source = dict(final_case=name + "-case", final_data=name + "-data")
+                summary["source_sha256"] = source
+                atomic_json(root / name / "thermal_analysis/thermal_summary.json", summary)
+                atomic_json(root / name / "aero_summary.json", dict(source_sha256=source,
+                    drag_per_unit_span_N_m=drag, force_stability=dict(status="passed"),
+                    residual_status="residual_screen_passed"))
             from pipeline import reporting
             original_save, titles, drawstyles = reporting._save, [], []
             def recording_save(fig, path, plt, dpi=160):
@@ -81,7 +88,9 @@ class AerothermalReportTests(unittest.TestCase):
                     titles.append(fig.axes[0].get_title())
                     drawstyles.extend(line.get_drawstyle() for line in fig.axes[0].lines)
                 return original_save(fig, path, plt, dpi)
-            with patch.object(reporting, "_save", side_effect=recording_save):
+            with patch.object(reporting, "_save", side_effect=recording_save), \
+                 patch("pipeline.mechanical_reporting.mechanical_complete", return_value=True), \
+                 patch("pipeline.gas_reporting.aero_complete_for_report", return_value=True):
                 outputs = create_comparison_outputs(root, [], root / "comparison")
             manifest = json.loads(Path(outputs["report_manifest"]).read_text())
             self.assertEqual(manifest["prescribed_surface_cases"], [])
@@ -98,8 +107,14 @@ class AerothermalReportTests(unittest.TestCase):
                          "final_surface_heat_load_normalized_position_png", "final_surface_heat_flux_maps_png",
                          "final_surface_heat_load_maps_png", "max_temperature_comparison_csv", "max_temperature_comparison_png",
                          "peak_heat_flux_comparison_csv", "peak_heat_flux_comparison_png",
-                         "total_heat_load_comparison_csv", "total_heat_load_comparison_png"):
+                         "total_heat_load_comparison_csv", "total_heat_load_comparison_png",
+                         "final_heat_load_vs_drag_csv", "final_heat_load_vs_drag_png",
+                         "peak_heat_flux_vs_drag_csv", "peak_heat_flux_vs_drag_png"):
                 self.assertTrue(Path(outputs[name]).is_file(), name)
+            trade = read_csv(outputs["final_heat_load_vs_drag_csv"])
+            self.assertEqual([float(row["drag_per_unit_span_N_m"]) for row in trade], [123., 456.])
+            self.assertEqual(float(trade[0]["final_net_heat_load_per_unit_span_J_m"]), 688000.)
+            self.assertEqual(float(trade[0]["peak_net_heat_flux_W_m2"]), 1020.)
             raw = read_csv(outputs["surface_energy_history_csv"])
             self.assertEqual(len(raw), 24)
             self.assertIn("cumulative_net_energy_J_m2", raw[0])
