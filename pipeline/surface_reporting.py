@@ -132,3 +132,69 @@ def peak_temperature_outputs(histories, directory, colors):
     ax.set_axisbelow(True)
     return dict(max_temperature_comparison_csv=str(write_csv(directory / "max_temperature_comparison.csv", rows)),
                 max_temperature_comparison_png=_save(fig, directory / "max_temperature_comparison.png", plt))
+
+
+def _load_comparison_bars(rows, fields, directory, stem, title, unit, colors):
+    if not rows:return {}
+    plt = _plotting()
+    fig, axes = plt.subplots(3, 1, figsize=(max(8, 1.3 * len(rows)), 9), sharex=True)
+    for ax, (field, label) in zip(axes, fields):
+        bars = ax.bar(np.arange(len(rows)), [row[field] for row in rows],
+                      color=[colors[row["design"]] for row in rows])
+        ax.bar_label(bars, labels=[f"{row[field]:.3g}" for row in rows], padding=4, fontsize=9)
+        ax.axhline(0, color="black", linewidth=.6)
+        ax.set(ylabel=f"{label}\n[{unit}]")
+        ax.margins(y=.25)
+        ax.grid(axis="y", alpha=.3)
+        ax.set_axisbelow(True)
+    axes[-1].set_xticks(np.arange(len(rows)), [row["design"] for row in rows], rotation=25, ha="right")
+    axes[-1].set_xlabel("Nose geometry")
+    fig.suptitle(title)
+    directory = Path(directory)
+    return {stem + "_csv": str(write_csv(directory / (stem + ".csv"), rows)),
+            stem + "_png": _save(fig, directory / (stem + ".png"), plt)}
+
+
+def surface_load_bar_outputs(cases, directory, colors):
+    """Compare peak local flux and final integrated energy as distinct metrics.
+
+    Peaks include every saved physical time and analyzed wall sample, including
+    the initial state. Each component can peak at a different time/location.
+    Heat-load bars use saved global J/m of span, not a local maximum or mean.
+    """
+    components = (("convective", "Convection into solid"), ("radiative", "Radiation out"), ("net", "Net into solid"))
+    flux_rows, load_rows = [], []
+    for name, source in cases.items():
+        flux = source.get("flux", [])
+        if flux:
+            row = dict(design=name, final_time_s=max(float(record["time_s"]) for record in flux),
+                       sampling="all saved analyzed wall samples and physical times; component peaks are independent")
+            for component, _ in components:
+                field = component + "_heat_flux_" + ("out_W_m2" if component == "radiative" else "into_solid_W_m2")
+                if any(numeric(record.get(field)) is None or numeric(record.get("time_s")) is None
+                       or float(record["time_s"]) < 0 for record in flux):
+                    raise ValueError("Flux bars require finite signed fluxes and nonnegative physical times")
+                peak = max(flux, key=lambda record: float(record[field]))
+                row.update({f"peak_{component}_heat_flux_W_m2": float(peak[field]),
+                            f"time_of_peak_{component}_flux_s": float(peak["time_s"]),
+                            f"peak_{component}_surface_order_index": int(peak["surface_order_index"])})
+            flux_rows.append(row)
+        global_history = source.get("global", [])
+        if global_history:
+            times = [numeric(record.get("time_s")) for record in global_history]
+            if any(time is None or time < 0 for time in times) or len(set(times)) != len(times):
+                raise ValueError("Heat-load bars require unique finite nonnegative physical times")
+            last = max(global_history, key=lambda record: float(record["time_s"]))
+            row = dict(design=name, final_time_s=float(last["time_s"]),
+                       integration="saved boundary-integrated cumulative energy per unit span at final physical time")
+            for component, _ in components:
+                field = f"cumulative_{component}_energy_per_unit_span_J_m"
+                if any(numeric(record.get(field)) is None for record in global_history):
+                    raise ValueError("Heat-load bars require finite saved integrated energies")
+                row[f"final_{component}_heat_load_per_unit_span_J_m"] = float(last[field])
+            load_rows.append(row)
+    created = _load_comparison_bars(flux_rows, [(f"peak_{name}_heat_flux_W_m2", label) for name, label in components],
+        directory, "peak_heat_flux_comparison", "Approximate Peak Surface Heat Flux (independent peaks over space and time)", "W/m²", colors)
+    created.update(_load_comparison_bars(load_rows, [(f"final_{name}_heat_load_per_unit_span_J_m", label) for name, label in components],
+        directory, "total_heat_load_comparison", "Approximate Accumulated Heat Load at End of Exposure", "J/m of span", colors))
+    return created

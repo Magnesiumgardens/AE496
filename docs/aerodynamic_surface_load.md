@@ -148,6 +148,21 @@ duration. This is not necessarily the final-time maximum. Wall-only historical
 data are not substituted for a missing all-solid history. Incompatible flow,
 material or duration settings continue to receive separate comparison groups.
 
+`peak_heat_flux_comparison.png` compares each nose's maximum signed local
+surface flux over every saved physical time and included wall sample, including
+the initial state, in W/m². Convection, radiation and net heating have separate
+panels; their peaks can occur at different times and locations, so peak
+components are not expected to add/subtract to the peak net value. Its CSV
+records the peak time and surface index for each component.
+
+`total_heat_load_comparison.png` compares final accumulated boundary energy in
+J/m of planar span using `global_energy_history.csv`. This is the integrated
+energy over the analyzed boundary, not a local maximum/mean in J/m² or peak
+flux multiplied by duration. Separate panels show incoming convective,
+outgoing radiative and signed net energy. Both bar charts and their CSVs are
+written to each nose's `reports/` and the compatible comparison folder when
+the corresponding saved data exist. Negative net cooling remains negative.
+
 `solver_temperature_history.csv` remains indexed by Fluent convergence
 iteration. It is not physical time or an input to the transient solid solver.
 

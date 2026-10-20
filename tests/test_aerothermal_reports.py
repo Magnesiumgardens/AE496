@@ -88,7 +88,9 @@ class AerothermalReportTests(unittest.TestCase):
                          "global_surface_energy_history_png", "surface_heat_flux_max_mean_history_png",
                          "surface_heat_load_max_mean_history_png", "final_surface_heat_flux_normalized_position_png",
                          "final_surface_heat_load_normalized_position_png", "final_surface_heat_flux_maps_png",
-                         "final_surface_heat_load_maps_png", "max_temperature_comparison_csv", "max_temperature_comparison_png"):
+                         "final_surface_heat_load_maps_png", "max_temperature_comparison_csv", "max_temperature_comparison_png",
+                         "peak_heat_flux_comparison_csv", "peak_heat_flux_comparison_png",
+                         "total_heat_load_comparison_csv", "total_heat_load_comparison_png"):
                 self.assertTrue(Path(outputs[name]).is_file(), name)
             raw = read_csv(outputs["surface_energy_history_csv"])
             self.assertEqual(len(raw), 24)
@@ -100,7 +102,8 @@ class AerothermalReportTests(unittest.TestCase):
                 self.assertTrue((root / name / "reports/final_wall_heat_flux_map.png").is_file())
                 self.assertTrue((root / "comparison/cases" / name / "surface_heat_flux_history.csv").is_file())
                 for filename in ("final_surface_heat_flux_position.png", "final_surface_heat_load_position.png",
-                                 "surface_heat_flux_max_mean_history.png", "surface_heat_load_max_mean_history.png"):
+                                 "surface_heat_flux_max_mean_history.png", "surface_heat_load_max_mean_history.png",
+                                 "peak_heat_flux_comparison.png", "total_heat_load_comparison.png"):
                     self.assertTrue((root / name / "reports" / filename).is_file())
             self.assertNotIn("h", outputs)
 

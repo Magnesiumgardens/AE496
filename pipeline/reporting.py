@@ -302,7 +302,7 @@ def _surface_load_history_outputs(cases, directory, colors=None):
     integrated power/energy and its documented boundary quadrature.
     """
     if not cases:return {}
-    from .surface_reporting import surface_quantity_outputs
+    from .surface_reporting import surface_quantity_outputs, surface_load_bar_outputs
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     plt = _plotting()
@@ -378,6 +378,7 @@ def _surface_load_history_outputs(cases, directory, colors=None):
             ax.grid(alpha=.3)
             ax.legend(fontsize=8)
             created[stem + "_png"] = _save(fig, directory / (stem + ".png"), plt)
+    created.update(surface_load_bar_outputs(cases, directory, colors))
     return created
 
 
