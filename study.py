@@ -36,11 +36,24 @@ def main():
     export.add_argument("--inspect-fields", action="store_true")
     force_status = commands.add_parser("force-status", help="Read force-history recording and verification details without Ansys")
     force_status.add_argument("--config", required=True)
+    calibration_status = commands.add_parser("calibration-status", help="Inspect saved matched RE/cold heating anchors without Ansys")
+    calibration_status.add_argument("--config", required=True)
     migrate = commands.add_parser("migrate", help="Back up and select the single radiative-equilibrium CFD workflow")
     migrate.add_argument("--config", required=True)
     migrate.add_argument("--thermal-config",help="Also back up and convert a separate Mechanical YAML")
     commands.add_parser("update", help="Fetch the study branch through Git and update with backups")
     args = parser.parse_args()
+    if args.command == "calibration-status":
+        import json
+        from pipeline.config import load_config
+        from pipeline.aerothermal_calibration import diagnose_calibration
+        from pipeline.thermal_loading import ThermalAnalysisError
+        try:
+            result = diagnose_calibration(load_config(args.config))
+        except (ValueError, OSError, ThermalAnalysisError) as exc:
+            result = dict(status="unavailable", error=str(exc))
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return 0 if result["status"] == "passed" else 2
     if args.command == "force-status":
         import json
         from pipeline.config import load_config

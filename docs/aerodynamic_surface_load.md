@@ -173,3 +173,35 @@ iteration. It is not physical time or an input to the transient solid solver.
 
 The cloud environment has no licensed Fluent or Mechanical engines. Live
 calibration and nonlinear thermal execution must be verified on Windows.
+
+## Diagnose a rejected calibration without another CFD run
+
+If package building reports that the cold/RE anchors do not identify positive
+conductance, first inspect the existing matched exports:
+
+```powershell
+.\.venv\Scripts\python.exe study.py calibration-status --config ".\runs\sharp_short\_batch\config.yaml"
+```
+
+This command is read-only and does not launch Ansys. It verifies source hashes,
+passed residual metadata, common geometry/mesh and physical face matching
+before reporting candidate conductances. It prints the failed face count,
+fraction of boundary length affected, and up to ten rejected faces with their
+coordinates, cold and equilibrium temperatures, both heating anchors and the
+signed candidate slope. Nonmatching or missing source files report
+`status: unavailable`; incompatible anchors report `status: failed` and exit
+with status 2.
+
+Future package builds also save every matched face to
+`thermal_bc/calibration_diagnostics.csv` and a summary to
+`thermal_bc/calibration_diagnostics.json`, including when the load fit fails.
+These diagnostics are not a usable Mechanical load package. No coefficient is
+clipped, sign-flipped or replaced, and no failing faces are dropped.
+
+For positive temperature separation, a nonpositive conductance means
+`q_cold <= epsilon*sigma*(T_eq**4 - T_rad**4)` at that location. Two complete
+steady wall-state CFD solutions need not provide a positive local slope:
+changing the whole wall temperature can alter the boundary layer and wake.
+Residual convergence alone does not validate this local surrogate. Diagnose
+the affected locations and magnitudes before deciding whether field extraction,
+numerical sensitivity or the heating approximation needs to change.

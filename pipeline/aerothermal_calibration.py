@@ -218,8 +218,8 @@ def _match_states(re_nodes, re_faces, re_edges, re_ids, cold_nodes, cold_faces, 
     return np.asarray(permutation, dtype=int)
 
 
-def build_surface_package(cfg):
-    """Build the provenance-checked, temperature-dependent solid heating input."""
+def _matched_calibration_inputs(cfg):
+    """Read and validate the same sources for calibration and diagnostics."""
     try:
         if cfg.get("thermal", {}).get("mode") != "radiative_equilibrium":
             raise ThermalAnalysisError("Aerodynamic surface-load calibration requires the primary radiative-equilibrium CFD state")
@@ -238,8 +238,90 @@ def build_surface_package(cfg):
         tc = settings["cold_wall_temperature_k"]
         if not np.allclose(cold_faces[:, 3], tc, rtol=1e-6, atol=1e-5) or not np.allclose(cold_nodes[:, 3], tc, rtol=1e-6, atol=1e-5):
             raise ThermalAnalysisError("Cold calibration field temperatures do not match its prescribed wall temperature")
-        h, source, qeq = derive_affine_heating(cold_faces[:, 3], re_faces[:, 3], cold_faces[:, 4],
-            settings["emissivity"], settings["external_radiation_temperature_K"], settings["min_delta_temperature_k"])
+        return (settings, paths, sources, re_metadata, re_nodes, re_faces, re_edges, re_ids, cold_faces, cold_ids, order)
+    except OSError as exc:
+        raise ThermalAnalysisError(f"Aerothermal calibration files are missing or unreadable: {exc}") from exc
+
+
+def _anchor_diagnostics(cfg, matched, *, write=False):
+    settings, paths, sources, _, _, re_faces, edges, re_ids, cold_faces, cold_ids, order = matched
+    tc, teq, qc = cold_faces[:, 3], re_faces[:, 3], cold_faces[:, 4]
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        qeq = settings["emissivity"] * STEFAN_BOLTZMANN * (teq**4 - settings["external_radiation_temperature_K"]**4)
+        delta, gap = teq - tc, qc - qeq
+        h = gap / delta
+        source = qc + h * tc
+    def finite(value):
+        return float(value) if np.isfinite(value) else None
+    rows = []
+    for index, point in enumerate(re_faces):
+        if delta[index] < settings["min_delta_temperature_k"]:
+            status = "insufficient_temperature_separation"
+        elif not all(np.isfinite(array[index]) for array in (qeq, h, source)):
+            status = "nonfinite_calibration"
+        elif h[index] <= 0:
+            status = "nonpositive_conductance"
+        else:
+            status = "passed"
+        scale = max(abs(qc[index]), abs(qeq[index]))
+        relative_gap = finite(gap[index] / scale) if np.isfinite(scale) and scale > 0 else (0. if scale == 0 else None)
+        rows.append(dict(surface_order_index=index, zone_name=re_ids[index][0],
+            re_face_index=re_ids[index][1], cold_face_index=cold_ids[order[index]][1],
+            x_m=float(point[0]), y_m=float(point[1]), segment_length_m=float(edges[index, 0]),
+            cold_wall_temperature_K=float(tc[index]), equilibrium_temperature_K=float(teq[index]),
+            cold_heat_flux_into_wall_W_m2=float(qc[index]), equilibrium_convective_heat_flux_W_m2=finite(qeq[index]),
+            temperature_separation_K=float(delta[index]), cold_minus_equilibrium_heat_flux_W_m2=finite(gap[index]),
+            relative_anchor_gap=relative_gap,
+            candidate_conductance_W_m2K=finite(h[index]), status=status))
+    failed = [row for row in rows if row["status"] != "passed"]
+    worst = sorted(failed, key=lambda row: row["candidate_conductance_W_m2K"]
+                   if row["candidate_conductance_W_m2K"] is not None else -np.inf)[:10]
+    finite_h = h[np.isfinite(h)]
+    summary = dict(status="failed" if failed else "passed", case=cfg["project"]["name"],
+        source_sha256=sources, calibration_settings=settings, face_count=len(rows), invalid_face_count=len(failed),
+        nonpositive_conductance_face_count=sum(row["status"] == "nonpositive_conductance" for row in rows),
+        insufficient_temperature_separation_face_count=sum(row["status"] == "insufficient_temperature_separation" for row in rows),
+        nonpositive_cold_heat_flux_face_count=int(np.count_nonzero(qc <= 0)),
+        failed_boundary_length_fraction=float(sum(row["segment_length_m"] for row in failed) / np.sum(edges[:, 0])),
+        minimum_conductance_W_m2K=finite(finite_h.min()) if len(finite_h) else None,
+        maximum_conductance_W_m2K=finite(finite_h.max()) if len(finite_h) else None,
+        minimum_cold_heat_flux_into_wall_W_m2=finite(qc.min()), maximum_cold_heat_flux_into_wall_W_m2=finite(qc.max()),
+        minimum_equilibrium_temperature_K=finite(teq.min()), maximum_equilibrium_temperature_K=finite(teq.max()),
+        worst_faces=worst,
+        interpretation="A passed CFD residual screen does not guarantee a positive local two-state heating slope. No coefficient is changed by this diagnosis.",
+        next_step="Inspect matched face temperatures, fluxes and positions before changing signs, wall states, numerics or the heating model.")
+    if write:
+        directory = paths["root"] / "thermal_bc"
+        summary.update(diagnostics_csv=str(directory / "calibration_diagnostics.csv"),
+                       diagnostics_json=str(directory / "calibration_diagnostics.json"))
+        atomic_csv(summary["diagnostics_csv"], rows)
+        atomic_json(summary["diagnostics_json"], summary)
+    return summary
+
+
+def diagnose_calibration(cfg, *, write=False):
+    """Inspect existing matched exports without launching a solver or fitting a usable load.
+
+    The default is read-only. The diagnostic CSV/JSON are never accepted as a
+    surface-load package, and negative slopes retain their original sign.
+    """
+    return _anchor_diagnostics(cfg, _matched_calibration_inputs(cfg), write=write)
+
+
+def build_surface_package(cfg):
+    """Build the provenance-checked, temperature-dependent solid heating input."""
+    matched = _matched_calibration_inputs(cfg)
+    settings, paths, sources, re_metadata, re_nodes, re_faces, re_edges, re_ids, cold_faces, cold_ids, order = matched
+    tc = settings["cold_wall_temperature_k"]
+    try:
+        diagnostics = _anchor_diagnostics(cfg, matched, write=True)
+        try:
+            h, source, qeq = derive_affine_heating(cold_faces[:, 3], re_faces[:, 3], cold_faces[:, 4],
+                settings["emissivity"], settings["external_radiation_temperature_K"], settings["min_delta_temperature_k"])
+        except ThermalAnalysisError as exc:
+            raise ThermalAnalysisError(f"{exc} Rejected {diagnostics['invalid_face_count']} of {diagnostics['face_count']} matched faces. "
+                f"See {diagnostics['diagnostics_csv']} and {diagnostics['diagnostics_json']}. "
+                "Inspect saved results with study.py calibration-status --config <case.yaml>; no additional CFD is needed for that diagnosis.") from exc
         lengths = re_edges[:, 0]
         nodal_h = face_values_to_nodes(h, lengths)
         nodal_source = face_values_to_nodes(source, lengths)
