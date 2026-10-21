@@ -31,6 +31,7 @@ def update_project(root, source, revision=None):
     tracked = git(source, "ls-tree", "-r", "--name-only", revision).decode().splitlines()
     selected = [name for name in tracked if
         (name.endswith(".py") and ("/" not in name or name.startswith(("pipeline/", "scripts/", "tests/"))))
+        or (name.startswith("scripts/") and name.endswith(".ps1"))
         or name in ("README.md", "NOSE_TRADE_README.md", "requirements.txt", "thermal_analysis.yaml")
         or (name.startswith("docs/") and name.endswith((".md", ".png")))
         or name.startswith("tests/fixtures/")

@@ -326,6 +326,31 @@ class SingleConfigurationTests(unittest.TestCase):
 
 
 class SingleInstallerTests(unittest.TestCase):
+    def test_git_update_delivers_powershell_sync_script_and_backs_up_its_old_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, target = Path(directory) / "source", Path(directory) / "target"
+            source.mkdir(); target.mkdir()
+            for name in ("config.yaml", "thermal_analysis.yaml", "batch.yaml"):
+                (source / name).write_bytes((ROOT / name).read_bytes())
+            (source / "study.py").write_text("# current application\n")
+            relative = Path("scripts/sync_onedrive.ps1")
+            (source / relative).parent.mkdir()
+            (source / relative).write_bytes((ROOT / relative).read_bytes())
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "-c", "user.name=Sync Test",
+                "-c", "user.email=sync@example.invalid", "commit", "-qm", "fixture"], check=True)
+            (target / "study.py").write_text("# existing application\n")
+            (target / relative).parent.mkdir()
+            (target / relative).write_text("# previous sync script\n")
+            result = target / "runs/nose/reports/result.csv"
+            result.parent.mkdir(parents=True)
+            result.write_bytes(b"retained simulation results\n")
+            backup = update_project(target, source)
+            self.assertEqual((target / relative).read_bytes(), (source / relative).read_bytes())
+            self.assertEqual((backup / relative).read_text(), "# previous sync script\n")
+            self.assertEqual(result.read_bytes(), b"retained simulation results\n")
+
     def test_monitor_only_git_update_retains_thermal_settings_and_results_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as directory:
             source, target = Path(directory) / "source", Path(directory) / "target"
