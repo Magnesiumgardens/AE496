@@ -7,7 +7,7 @@ Copy current AE496 results into a locally synced OneDrive shared folder.
 [CmdletBinding()]
 param(
     [string]$Destination,
-    [string]$Source = (Join-Path $PSScriptRoot '..\runs'),
+    [string]$Source,
     [ValidateSet('Reports', 'All')]
     [string]$Mode = 'Reports',
     [switch]$Watch,
@@ -16,6 +16,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Resolve script-relative defaults after parameter binding. Windows PowerShell
+# can evaluate parameter defaults before PSScriptRoot has been populated.
+$scriptDirectory = $PSScriptRoot
+if (-not $scriptDirectory -and $PSCommandPath) {
+    $scriptDirectory = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+}
+if (-not $scriptDirectory -and $MyInvocation.MyCommand.Path) {
+    $scriptDirectory = [System.IO.Path]::GetDirectoryName($MyInvocation.MyCommand.Path)
+}
+if (-not $scriptDirectory) {
+    throw 'Run the saved sync_onedrive.ps1 file with powershell.exe -File, rather than pasting its contents.'
+}
+if (-not $Source) { $Source = Join-Path $scriptDirectory '..\runs' }
 if (-not (Get-Command robocopy.exe -ErrorAction SilentlyContinue)) {
     throw 'This script requires Windows robocopy.exe.'
 }
@@ -51,7 +64,7 @@ if ($sourcePrefix.StartsWith($destinationPrefix, [System.StringComparison]::Ordi
     throw 'Source and destination must be separate folders; neither may contain the other.'
 }
 [System.IO.Directory]::CreateDirectory($destinationPath) | Out-Null
-$logDirectory = Join-Path $PSScriptRoot '..\logs\onedrive_sync'
+$logDirectory = Join-Path $scriptDirectory '..\logs\onedrive_sync'
 [System.IO.Directory]::CreateDirectory($logDirectory) | Out-Null
 $logPath = Join-Path $logDirectory 'sync.log'
 $filePatterns = if ($Mode -eq 'Reports') {
