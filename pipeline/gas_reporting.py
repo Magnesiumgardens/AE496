@@ -41,6 +41,8 @@ COMPARISON_ARTIFACTS = (
     "temperature_summary.csv", "temperature_profiles.csv", "steady_temperature_report.json",
     "force_iteration_history_comparison.csv", "force_iteration_history_comparison.png",
     "aerodynamic_comparison.csv", "drag_components_comparison.png",
+    "raw_max_wall_temperature_comparison.png", "raw_max_wall_temperature_comparison.csv",
+    "raw_max_near_wall_fluid_temperature_comparison.png", "raw_max_near_wall_fluid_temperature_comparison.csv",
 )
 
 
@@ -646,6 +648,12 @@ def create_gas_reports(runs_dir, output_dir):
         fields=list(profiles[0]) if profiles else ["design", "s_norm", "wall_temperature_K", "near_wall_fluid_temperature_K"]))
     created.update(_force_comparison(force_cases, rows, output_dir, len(force_conditions) <= 1, plt))
     if comparable and profiles:
+        from .temperature_comparison import steady_temperature_bars
+        temperature_bars = steady_temperature_bars(cases, output_dir, plt)
+        created.update(temperature_bars)
+        for key, path in temperature_bars.items():
+            if key.endswith("_png"):
+                print(f"[report] Saved raw maximum-temperature comparison: {path}")
         with_convection = [case for case in cases if case["convection"]]
         if with_convection:
             fig, ax = plt.subplots(figsize=(10, 5))

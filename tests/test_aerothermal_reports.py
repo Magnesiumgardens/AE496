@@ -107,6 +107,7 @@ class AerothermalReportTests(unittest.TestCase):
                          "surface_heat_load_max_mean_history_png", "final_surface_heat_flux_normalized_position_png",
                          "final_surface_heat_load_normalized_position_png", "final_surface_heat_flux_maps_png",
                          "final_surface_heat_load_maps_png", "max_temperature_comparison_csv", "max_temperature_comparison_png",
+                         "final_temperature_comparison_csv", "final_temperature_comparison_png",
                          "peak_heat_flux_comparison_csv", "peak_heat_flux_comparison_png",
                          "total_heat_load_comparison_csv", "total_heat_load_comparison_png",
                          "final_heat_load_vs_drag_csv", "final_heat_load_vs_drag_png",

@@ -192,6 +192,8 @@ Heat flux and accumulated heat load also have maximum/mean histories, final norm
 
 The solid comparison folder also includes `final_heat_load_vs_drag.png` (final accumulated net energy versus sectional drag) and `peak_heat_flux_vs_drag.png` (peak net surface flux over the exposure versus sectional drag), with nose labels and CSVs. They reuse current saved thermal/aerodynamic results from matching CFD sources; `thermal_drag_pairing.csv` explains any excluded cases.
 
+Maximum-temperature bar charts compare each nose's raw steady CFD wall temperature, peak solid temperature during the configured exposure (200 s by default), and maximum solid temperature at its end. All use kelvin, label the actual exposure, and regenerate from saved results; see [temperature bar charts and filenames](docs/temperature_bars.md).
+
 For automatic copying of plots, CSVs and summaries into a shared OneDrive folder, use [the Windows sync helper](docs/onedrive_results.md). It replaces matching files, preserves the runs folder structure, and can repeat every minute while OneDrive uploads the local copies.
 
 The current thermal template excludes the flat rear closure using `calibration.exclude_rear_face: true`. It keeps the solid closed but treats the rear as an insulated cut: no applied gas heating or radiation, and no modeled attachment conduction. Each nose's flux/load plots and energy integrals cover the included nose/top/bottom surfaces. Full-solid temperatures and maximum-temperature bars still include the entire solid. CFD geometry, wake and full-body drag/lift integration retain the rear. Updating rebuilds the affected thermal results while reusing compatible saved CFD states.

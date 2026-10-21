@@ -108,7 +108,7 @@ def peak_temperature_outputs(histories, directory, colors):
     maximum. Neither the final temperature nor a mean is used as the peak.
     """
     if not histories:return {}
-    rows = []
+    rows, final_rows = [], []
     for name, records in histories.items():
         values = [(numeric(row.get("time_s")), numeric(row.get("maximum_K"))) for row in records]
         if not values or any(t is None or t < 0 or value is None or value <= 0 for t, value in values):
@@ -119,6 +119,8 @@ def peak_temperature_outputs(histories, directory, colors):
         time, peak = max(values, key=lambda item: item[1])
         rows.append(dict(design=name, peak_temperature_K=peak, time_of_peak_s=time,
                          final_time_s=values[-1][0], sampling="all saved solid nodes and physical result sets"))
+        final_rows.append(dict(design=name, final_temperature_K=values[-1][1], final_time_s=values[-1][0],
+                               sampling="maximum across all solid nodes at the final saved physical time"))
     directory = Path(directory)
     plt = _plotting()
     fig, ax = plt.subplots(figsize=(max(8, 1.3 * len(rows)), 5))
@@ -126,12 +128,29 @@ def peak_temperature_outputs(histories, directory, colors):
                   color=[colors[row["design"]] for row in rows])
     ax.set_xticks(np.arange(len(rows)), [row["design"] for row in rows], rotation=25, ha="right")
     ax.bar_label(bars, labels=[f"{row['peak_temperature_K']:,.1f} K" for row in rows], padding=4)
-    ax.set(ylabel="Peak solid temperature [K]", title="Maximum Temperature During Each Exposure (all saved solid nodes)")
+    durations = sorted({row["final_time_s"] for row in rows})
+    exposure = f"0–{durations[0]:g} s" if len(durations) == 1 else "each saved exposure; durations in CSV"
+    ax.set(ylabel="Peak solid temperature [K]", title=f"Maximum Solid Temperature During Exposure ({exposure})")
     ax.set_ylim(0, max(row["peak_temperature_K"] for row in rows) * 1.15)
     ax.grid(axis="y", alpha=.3)
     ax.set_axisbelow(True)
-    return dict(max_temperature_comparison_csv=str(write_csv(directory / "max_temperature_comparison.csv", rows)),
-                max_temperature_comparison_png=_save(fig, directory / "max_temperature_comparison.png", plt))
+    created = dict(max_temperature_comparison_csv=str(write_csv(directory / "max_temperature_comparison.csv", rows)),
+                   max_temperature_comparison_png=_save(fig, directory / "max_temperature_comparison.png", plt))
+    fig, ax = plt.subplots(figsize=(max(8, 1.3 * len(final_rows)), 5))
+    bars = ax.bar(np.arange(len(final_rows)), [row["final_temperature_K"] for row in final_rows],
+                  color=[colors[row["design"]] for row in final_rows])
+    ax.set_xticks(np.arange(len(final_rows)), [row["design"] for row in final_rows], rotation=25, ha="right")
+    ax.bar_label(bars, labels=[f"{row['final_temperature_K']:,.1f} K" for row in final_rows], padding=4)
+    final_time = f"t={durations[0]:g} s" if len(durations) == 1 else "final saved times; durations in CSV"
+    ax.set(ylabel="Maximum final solid temperature [K]", title=f"Maximum Solid Temperature at End of Exposure ({final_time})")
+    ax.set_ylim(0, max(row["final_temperature_K"] for row in final_rows) * 1.15)
+    ax.grid(axis="y", alpha=.3)
+    ax.set_axisbelow(True)
+    created.update(final_temperature_comparison_csv=str(write_csv(directory / "final_temperature_comparison.csv", final_rows)),
+                   final_temperature_comparison_png=_save(fig, directory / "final_temperature_comparison.png", plt))
+    for key, path in created.items():
+        if key.endswith("_png"):print(f"[report] Saved solid temperature comparison: {path}")
+    return created
 
 
 def _load_comparison_bars(rows, fields, directory, stem, title, unit, colors):

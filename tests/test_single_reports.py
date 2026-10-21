@@ -98,6 +98,14 @@ class SingleSolveReportTests(unittest.TestCase):
             self.assertFalse((root/'comparison/adiabatic_report.json').exists())
             manifest=json.loads((root/'comparison/radiative_equilibrium_report.json').read_text())
             self.assertTrue(manifest['comparable_conditions'])
+            for stem, field in (("raw_max_wall_temperature_comparison", "maximum_wall_temperature_K"),
+                                ("raw_max_near_wall_fluid_temperature_comparison", "maximum_near_wall_fluid_temperature_K")):
+                self.assertTrue(Path(files[stem + "_png"]).is_file())
+                self.assertEqual(manifest["files"][stem + "_png"], files[stem + "_png"])
+                records = read_csv(files[stem + "_csv"])
+                self.assertEqual([record["design"] for record in records], ["blunt", "sharp"])
+                for record, summary in zip(records, rows):
+                    self.assertEqual(float(record[field]), summary[field])
 
     def test_old_adiabatic_export_and_unscreened_case_cannot_supply_radiating_reports(self):
         with tempfile.TemporaryDirectory() as directory:
