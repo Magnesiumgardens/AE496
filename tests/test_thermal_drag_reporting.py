@@ -19,7 +19,11 @@ class ThermalDragTests(unittest.TestCase):
             (work / "_batch").mkdir(parents=True)
             (work / "_batch/config.yaml").write_text(f"project: {{name: {name}}}\n")
             (work / "thermal_analysis").mkdir()
-            (work / "thermal_analysis/thermal_summary.json").write_text(json.dumps(dict(source_sha256=sources)))
+            # Use the real calibrated thermal runner's four-key provenance,
+            # rather than copying the drag export's two-key representation.
+            thermal_sources = dict(re_case=sources["final_case"], re_data=sources["final_data"],
+                                   cold_case="cold-case-hash", cold_data="cold-data-hash")
+            (work / "thermal_analysis/thermal_summary.json").write_text(json.dumps(dict(source_sha256=thermal_sources)))
             (work / "aero_summary.json").write_text(json.dumps(dict(drag_per_unit_span_N_m=drag,
                 source_sha256=sources, force_stability=dict(status="passed" if name == "blunt" else "not_verified"),
                 residual_status="residual_screen_passed")))

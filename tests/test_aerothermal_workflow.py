@@ -244,6 +244,35 @@ class AerothermalWorkflowTests(unittest.TestCase):
             self.study()
         self.assertEqual(self.calls, [])
 
+    def test_heat_drag_plots_regenerate_from_real_saved_provenance_without_batch_or_engines(self):
+        self.study()
+        self.calls.clear()
+        from pipeline.mechanical_reporting import create_mechanical_reports, mechanical_complete
+        from pipeline.gas_reporting import aero_complete_for_report
+        from pipeline.reporting import read_csv
+        cfg = load_config(self.path)
+        self.assertTrue(mechanical_complete(self.work, cfg))
+        self.assertTrue(aero_complete_for_report(cfg))
+        saved = {path: file_sha256(path) for path in (
+            self.work / "04_final.cas.h5", self.work / "04_final.dat.h5",
+            self.work / "aero_summary.json", self.work / "thermal_bc/surface_load_summary.json",
+            self.work / "thermal_analysis/thermal_summary.json",
+            self.work / "thermal_analysis/global_energy_history.csv")}
+        # The production report entry point uses the real freshness validators;
+        # only native launchers are forbidden here. The saved thermal receipt
+        # contains RE+cold provenance; drag contains only the primary RE pair.
+        with patch("ansys.mapdl.core.launch_mapdl", side_effect=AssertionError("Reporting launched MAPDL")), \
+             patch("ansys.fluent.core.launch_fluent", side_effect=AssertionError("Reporting launched Fluent")):
+            rows, outputs = create_mechanical_reports(self.root / "runs", self.root / "comparison/solid")
+        self.assertEqual([row["case"] for row in rows], ["nose"])
+        for stem in ("final_heat_load_vs_drag", "peak_heat_flux_vs_drag"):
+            self.assertTrue(Path(outputs[stem + "_png"]).is_file())
+            points = read_csv(outputs[stem + "_csv"])
+            self.assertEqual([point["design"] for point in points], ["nose"])
+        self.assertEqual(read_csv(outputs["thermal_drag_pairing_csv"])[0]["included"], "True")
+        self.assertEqual(self.calls, [])
+        for path, digest in saved.items():self.assertEqual(file_sha256(path), digest)
+
     def test_200_to_400_seconds_only_reruns_mechanical(self):
         self.study()
         self.calls.clear()

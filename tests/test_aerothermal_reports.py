@@ -76,7 +76,8 @@ class AerothermalReportTests(unittest.TestCase):
             for name, drag in (("blunt", 123.), ("sharp", 456.)):
                 summary = saved_aerothermal(root / name)
                 source = dict(final_case=name + "-case", final_data=name + "-data")
-                summary["source_sha256"] = source
+                summary["source_sha256"] = dict(re_case=source["final_case"], re_data=source["final_data"],
+                                               cold_case=name + "-cold-case", cold_data=name + "-cold-data")
                 atomic_json(root / name / "thermal_analysis/thermal_summary.json", summary)
                 atomic_json(root / name / "aero_summary.json", dict(source_sha256=source,
                     drag_per_unit_span_N_m=drag, force_stability=dict(status="passed"),

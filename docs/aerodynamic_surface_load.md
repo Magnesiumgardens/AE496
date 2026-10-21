@@ -183,6 +183,9 @@ W/m². Both use total sectional drag in N/m of span on the horizontal axis.
 Flux peaks include the initial state. The heat-load definition matches the
 existing final heat-load bars. Cases are paired by name and must have current
 thermal and aerodynamic results from the same saved CFD case/data pair.
+The thermal receipt's `re_case`/`re_data` hashes match the drag receipt's
+`final_case`/`final_data` hashes. Cold-wall hashes remain part of calibration
+validation; they are not compared against the primary drag pair.
 `thermal_drag_pairing.csv` records included cases and exclusion reasons.
 An × marker identifies points with unverified or failed drag/residual screens;
 these plots do not select an optimal geometry or claim a Pareto frontier.

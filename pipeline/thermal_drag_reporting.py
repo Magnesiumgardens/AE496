@@ -5,6 +5,21 @@ from .reporting import _plotting, _save, load_yaml, numeric, read_csv, read_json
 from .trade_study import aero_report_fields, force_screening_eligible, read_aero
 
 
+def _thermal_primary_source(thermal):
+    """Compare drag with the RE pair, retaining the cold pair for calibration.
+
+    The actual calibrated thermal runner records re_case/re_data AND
+    cold_case/cold_data. Drag records final_case/final_data from the RE run.
+    Those whole dictionaries must not be compared for equality.
+    """
+    sources = thermal.get("source_sha256", {})
+    if not isinstance(sources, dict):
+        return {}
+    if "re_case" in sources or "re_data" in sources:
+        return {"final_case": sources.get("re_case"), "final_data": sources.get("re_data")}
+    return {"final_case": sources.get("final_case"), "final_data": sources.get("final_data")}
+
+
 def thermal_drag_outputs(runs_dir, cases, directory, colors):
     """Use the same net metrics as the existing heat-load and heat-flux bars."""
     from .gas_reporting import aero_complete_for_report
@@ -39,7 +54,8 @@ def thermal_drag_outputs(runs_dir, cases, directory, colors):
                 reason = "thermal_result_missing_or_stale"
             elif not aero_complete_for_report(cfg):
                 reason = "aerodynamic_result_missing_or_stale"
-            elif not aero.get("source_sha256") or aero["source_sha256"] != thermal.get("source_sha256"):
+            elif (not all(_thermal_primary_source(thermal).values())
+                  or aero.get("source_sha256") != _thermal_primary_source(thermal)):
                 reason = "aerodynamic_and_thermal_CFD_sources_differ"
             elif drag is None:
                 reason = "sectional_drag_unavailable"
@@ -63,6 +79,9 @@ def thermal_drag_outputs(runs_dir, cases, directory, colors):
     created = {}
     if pairing:
         created["thermal_drag_pairing_csv"] = str(write_csv(directory / "thermal_drag_pairing.csv", pairing))
+        for row in pairing:
+            if not row["included"]:
+                print(f"[report] {row['design']}: heat/drag plots skipped ({row['reason']}); see {directory / 'thermal_drag_pairing.csv'}")
     # Remove only this function's artifacts if regeneration has no valid pairs.
     for stem, _, _, _ in specifications:
         for suffix in (".png", ".csv"):
@@ -86,4 +105,5 @@ def thermal_drag_outputs(runs_dir, cases, directory, colors):
             fig.text(.5, .01, "× = drag stability or residual screening unverified/failed", ha="center", fontsize=9)
         created[stem + "_csv"] = str(write_csv(directory / (stem + ".csv"), records))
         created[stem + "_png"] = _save(fig, directory / (stem + ".png"), plt)
+        print(f"[report] Saved heat/drag comparison: {created[stem + '_png']}")
     return created
