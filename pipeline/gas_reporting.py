@@ -718,8 +718,7 @@ def create_gas_reports(runs_dir, output_dir):
             for row in complete:
                 ax.scatter(row["drag_per_unit_span_N_m"], row[metric],
                            marker="o" if force_screening_eligible(row) else "x")
-                ax.annotate(row["case"] + " [" + row["force_stability_status"] + "]",
-                            (row["drag_per_unit_span_N_m"], row[metric]))
+                ax.annotate(row["case"], (row["drag_per_unit_span_N_m"], row[metric]))
             ax.set(xlabel="Sectional drag [N/m]", ylabel="Maximum wall temperature [K]" if "radiative_equilibrium" in modes else "Maximum fluid-side surface temperature [K]",
                    title=labels["wall"] + " and drag comparison")
             ax.grid(alpha=0.3)
