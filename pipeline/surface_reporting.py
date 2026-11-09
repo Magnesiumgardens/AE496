@@ -153,7 +153,7 @@ def peak_temperature_outputs(histories, directory, colors):
     return created
 
 
-def _load_comparison_bars(rows, fields, directory, stem, title, unit, colors):
+def _load_comparison_bars(rows, fields, directory, stem, title, unit, colors, note=None):
     if not rows:return {}
     plt = _plotting()
     fig, axes = plt.subplots(3, 1, figsize=(max(8, 1.3 * len(rows)), 9), sharex=True)
@@ -169,6 +169,7 @@ def _load_comparison_bars(rows, fields, directory, stem, title, unit, colors):
     axes[-1].set_xticks(np.arange(len(rows)), [row["design"] for row in rows], rotation=25, ha="right")
     axes[-1].set_xlabel("Nose geometry")
     fig.suptitle(title)
+    if note:fig.text(.5, .005, note, ha="center", fontsize=8)
     directory = Path(directory)
     return {stem + "_csv": str(write_csv(directory / (stem + ".csv"), rows)),
             stem + "_png": _save(fig, directory / (stem + ".png"), plt)}
@@ -196,7 +197,9 @@ def surface_load_bar_outputs(cases, directory, colors):
                 peak = max(flux, key=lambda record: float(record[field]))
                 row.update({f"peak_{component}_heat_flux_W_m2": float(peak[field]),
                             f"time_of_peak_{component}_flux_s": float(peak["time_s"]),
-                            f"peak_{component}_surface_order_index": int(peak["surface_order_index"])})
+                            f"peak_{component}_surface_order_index": int(peak["surface_order_index"]),
+                            f"peak_{component}_x_m": numeric(peak.get("x_m")),
+                            f"peak_{component}_y_m": numeric(peak.get("y_m"))})
             flux_rows.append(row)
         global_history = source.get("global", [])
         if global_history:
@@ -212,8 +215,10 @@ def surface_load_bar_outputs(cases, directory, colors):
                     raise ValueError("Heat-load bars require finite saved integrated energies")
                 row[f"final_{component}_heat_load_per_unit_span_J_m"] = float(last[field])
             load_rows.append(row)
+    archived_report = any("validation_status" in source for source in cases.values())
+    note = "Saved-data comparison; available source checks and run conditions are recorded in the CSV/report." if archived_report else None
     created = _load_comparison_bars(flux_rows, [(f"peak_{name}_heat_flux_W_m2", label) for name, label in components],
-        directory, "peak_heat_flux_comparison", "Approximate Peak Surface Heat Flux (independent peaks over space and time)", "W/m²", colors)
+        directory, "peak_heat_flux_comparison", "Approximate Peak Surface Heat Flux (independent peaks over space and time)", "W/m²", colors, note=note)
     created.update(_load_comparison_bars(load_rows, [(f"final_{name}_heat_load_per_unit_span_J_m", label) for name, label in components],
         directory, "total_heat_load_comparison", "Approximate Accumulated Heat Load at End of Exposure", "J/m of span", colors))
     return created

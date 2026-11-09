@@ -190,6 +190,8 @@ Each nose gets normalized back → nose → back temperature profiles, wall and 
 
 Heat flux and accumulated heat load also have maximum/mean histories, final normalized surface profiles and boundary maps, separately showing convection, radiation and net heating. The maximum-temperature bar chart uses each nose's peak over all saved solid nodes and physical times, rather than only its final temperature. Run `study.py report --runs-dir runs` to regenerate these figures without Ansys; see [plot filenames and definitions](docs/aerodynamic_surface_load.md).
 
+For a lightweight peak heat-flux comparison directly from your saved CSVs, run `study.py report-heat-flux --runs-dir runs`. It produces `runs/comparison/peak_heat_flux/peak_heat_flux_comparison.png` and CSV values with each nose's peak convection/radiation/net flux, time and location. It needs no native Ansys files or batch rerun; saved-data checks and missing cases are recorded explicitly. See [peak heat-flux reporting](docs/peak_heat_flux.md).
+
 The solid comparison folder also includes `final_heat_load_vs_drag.png` (final accumulated net energy versus sectional drag) and `peak_heat_flux_vs_drag.png` (peak net surface flux over the exposure versus sectional drag), with nose labels and CSVs. They reuse current saved thermal/aerodynamic results from matching CFD sources; `thermal_drag_pairing.csv` explains any excluded cases.
 
 Maximum-temperature bar charts compare each nose's raw steady CFD wall temperature, peak solid temperature during the configured exposure (200 s by default), and maximum solid temperature at its end. All use kelvin, label the actual exposure, and regenerate from saved results; see [temperature bar charts and filenames](docs/temperature_bars.md).

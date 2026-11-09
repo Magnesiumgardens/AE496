@@ -13,6 +13,8 @@ def compare(runs_dir, output_dir, reference_dir=None):
         gas = create_gas_reports(runs_dir, output_dir)
         from pipeline.mechanical_reporting import create_mechanical_reports
         create_mechanical_reports(runs_dir, Path(output_dir) / "solid")
+        from pipeline.peak_flux_reporting import report_peak_heat_flux
+        report_peak_heat_flux(runs_dir, Path(output_dir) / "peak_heat_flux")
         return gas
     runs_dir, output_dir = Path(runs_dir), Path(output_dir)
     rows, legacy_names = [], set()

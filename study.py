@@ -31,6 +31,9 @@ def main():
     report.add_argument("--runs-dir", default="runs")
     report.add_argument("--output-dir", default="runs/comparison")
     report.add_argument("--reference-dir", help="Import the provided combined historical comparison CSVs")
+    peak_flux = commands.add_parser("report-heat-flux", help="Compare peaks directly from existing surface heat-flux CSVs; no Ansys")
+    peak_flux.add_argument("--runs-dir", default="runs")
+    peak_flux.add_argument("--output-dir", help="Defaults to <runs-dir>/comparison/peak_heat_flux")
     export = commands.add_parser("export", help="Export solved wall temperatures and forces from the selected CFD case")
     export.add_argument("--config", required=True)
     export.add_argument("--inspect-fields", action="store_true")
@@ -63,6 +66,13 @@ def main():
     if args.command == "update":
         from update import main as update_main
         return update_main()
+    if args.command == "report-heat-flux":
+        from pipeline.peak_flux_reporting import report_peak_heat_flux
+        try:
+            result = report_peak_heat_flux(args.runs_dir, args.output_dir)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        return 0 if result["case_count"] else 2
     if args.command == "migrate":
         from pipeline.migration import migrate_config
         thermal_change=None
