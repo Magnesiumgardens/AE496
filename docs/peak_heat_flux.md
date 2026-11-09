@@ -24,6 +24,47 @@ Outputs are in `runs/comparison/peak_heat_flux`:
 - `peak_heat_flux_report.json`: included groups, available run conditions,
   the interpretation of the peaks, and explicit exclusion reasons.
 
+## Select the current geometry batch and compare mk3 with mk4
+
+When `geometry_batch` exists beside `runs`, the report uses its `*.x_t` CAD
+inventory to select saved case folders. Old run folders with no corresponding
+CAD input do not enter this selection. It uses the same filename-to-case-name
+mapping as batch execution, with case-insensitive matching on Windows and other
+platforms. It never opens CAD in Ansys or generates a new mesh.
+
+To select mk3/mk4 filenames explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe study.py report-heat-flux --runs-dir ".\runs" --geometry-dir ".\geometry_batch" --cases "*mk3*" "*mk4*"
+```
+
+The case filters accept case-insensitive names or wildcard patterns. Use exact
+filenames/stems instead when selecting a particular variant. `--geometry-glob`
+can match the CAD pattern in `batch.yaml` if it differs from `*.x_t`.
+The JSON report records the entire CAD inventory, selection, matched run names,
+and any missing saved results. Available calibration CAD hashes are checked;
+if a CAD file was changed after its saved calibration, the old result is
+excluded rather than labeled as the new geometry. Archives without those
+hashes are explicitly identified as filename-only matches.
+
+The comparison includes spatial curves overlaying the selected noses:
+
+- `peak_heat_flux_spatial_envelope.png`/`.csv`: maximum signed flux at each
+  saved wall location over all saved times. Different locations can peak at
+  different times; this envelope is not one physical snapshot.
+- `initial_heat_flux_spatial_comparison.png`/`.csv`: first saved distribution,
+  labeled with its actual physical time (normally 0 s).
+- `final_heat_flux_spatial_comparison.png`/`.csv`: final saved distribution,
+  labeled with its actual physical time (normally 200 s).
+
+Each image separates incoming convection, outward radiation, and net flux.
+The horizontal coordinate is normalized distance along each nose's included
+surface, back-to-nose-to-back, with the nose at 0.5. Each nose uses its own
+original points; no flux values are interpolated between mk3 and mk4. The CSVs
+also retain physical distance and original x/y coordinates. An insulated rear
+closure is not drawn as a connecting profile segment. Invalid/incomplete spatial
+data are reported separately; a valid scalar peak bar can still be produced.
+
 Different recorded settings or exposure durations get separate `conditions_*`
 subfolders instead of a single mixed-condition chart. CSV-only archives with
 unknown conditions are separated from receipt-backed results. Use `--output-dir`

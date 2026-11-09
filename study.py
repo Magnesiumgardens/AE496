@@ -34,6 +34,9 @@ def main():
     peak_flux = commands.add_parser("report-heat-flux", help="Compare peaks directly from existing surface heat-flux CSVs; no Ansys")
     peak_flux.add_argument("--runs-dir", default="runs")
     peak_flux.add_argument("--output-dir", help="Defaults to <runs-dir>/comparison/peak_heat_flux")
+    peak_flux.add_argument("--geometry-dir", help="Select CAD cases from this folder; auto-detects geometry_batch beside runs")
+    peak_flux.add_argument("--geometry-glob", default="*.x_t", help="CAD filename pattern, as in batch.yaml")
+    peak_flux.add_argument("--cases", nargs="+", help="Case-insensitive CAD/case names or wildcard patterns, e.g. '*mk3*' '*mk4*'")
     export = commands.add_parser("export", help="Export solved wall temperatures and forces from the selected CFD case")
     export.add_argument("--config", required=True)
     export.add_argument("--inspect-fields", action="store_true")
@@ -69,7 +72,8 @@ def main():
     if args.command == "report-heat-flux":
         from pipeline.peak_flux_reporting import report_peak_heat_flux
         try:
-            result = report_peak_heat_flux(args.runs_dir, args.output_dir)
+            result = report_peak_heat_flux(args.runs_dir, args.output_dir, geometry_dir=args.geometry_dir,
+                                          geometry_glob=args.geometry_glob, cases=args.cases)
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
         return 0 if result["case_count"] else 2
