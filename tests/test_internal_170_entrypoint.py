@@ -5,12 +5,12 @@ from unittest.mock import patch
 from run_internal_170 import main
 
 
-class Internal170EntryTests(unittest.TestCase):
-    def test_default_runs_170_seconds_and_report_mode_uses_the_same_physical_settings(self):
-        with patch("run_internal_170.compare_internal",return_value={"status":"complete"}) as run:
+class InternalDurationEntryTests(unittest.TestCase):
+    def test_legacy_entrypoint_runs_500_seconds_and_report_mode_keeps_the_same_settings(self):
+        with patch("run_internal_500.compare_internal",return_value={"status":"complete"}) as run:
             self.assertEqual(main([]),0)
             options = run.call_args.kwargs
-            self.assertEqual(options["duration_s"],170.)
+            self.assertEqual(options["duration_s"],500.)
             self.assertEqual(options["processors"],1)
             self.assertFalse(options["report_only"])
             self.assertEqual(options["swap_labels"],["mk3_body_internals_base_nose1","mk3_body_internals_blunt_nose"])

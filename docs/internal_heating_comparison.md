@@ -252,27 +252,29 @@ It does not rename CAD, run folders or per-case data, or alter source hashes.
 Include the same flag whenever regenerating these corrected comparisons.
 Omit it to return to the original labels. Both names must be in the selection.
 
-### One command for a 170-second carbon–carbon transient
+### One command for a 500-second carbon–carbon transient
 
 The convenience entry point includes the confirmed MK3 name swap, one
 shared-memory thread, and the existing C/C example configuration:
 
 ```powershell
-.\.venv\Scripts\python.exe run_internal_170.py
+.\.venv\Scripts\python.exe run_internal_500.py
 ```
 
-Use `run_internal_170.py --report-only` to regenerate its saved 170 s reports.
+Use `run_internal_500.py --report-only` to regenerate its saved 500 s reports.
+The previous `run_internal_170.py` entry point now forwards to the same 500 s
+study so an existing local shortcut does not silently retain the old duration.
 This wrapper selects the MK3/MK4 cases. The equivalent general command is below.
 
-Use `--duration-s 170` to solve a physical exposure ending at exactly 170 s
+Use `--duration-s 500` to solve a physical exposure ending at exactly 500 s
 without editing the example YAML. This runs the internal C/C solid models
 using their already-prepared CFD calibrations, with the corrected MK3 names:
 
 ```powershell
-.\.venv\Scripts\python.exe -u study.py internal-compare --screening-config .\internal_screening_carbon_carbon.yaml --duration-s 170 --processors 1 --cases "*mk3*" "*mk4*" --swap-labels mk3_body_internals_base_nose1 mk3_body_internals_blunt_nose
+.\.venv\Scripts\python.exe -u study.py internal-compare --screening-config .\internal_screening_carbon_carbon.yaml --duration-s 500 --processors 1 --cases "*mk3*" "*mk4*" --swap-labels mk3_body_internals_base_nose1 mk3_body_internals_blunt_nose
 ```
 
-This is a new 170 s solve, not a relabeling of a saved 200 s result. It
+This is a new 500 s solve, not a relabeling of a saved 170 or 200 s result. It
 overwrites the selected cases' derived internal-analysis results; native
 attempt directories remain separate. The duration is recorded in the physics
 settings. Missing calibration still excludes that case rather than silently
@@ -281,13 +283,13 @@ running a different workflow or substituting another nose's loads.
 Each case gets temperature histories, its final solid field, surface heat
 flux/heat-load CSVs and derived figures under `internal_analysis/plots/`.
 The combined flux, heat-load histories, final spatial distributions at
-170 s and bar charts are in `comparison/internal_heating/surface_loads/`.
+500 s and bar charts are in `comparison/internal_heating/surface_loads/`.
 Convection into the solid, radiation out and net flux remain separate. The
-peak-internal-temperature bar now explicitly states the 0–170 s interval.
+peak-internal-temperature bar explicitly states the 0–500 s interval.
 
 To regenerate those reports later without solving, repeat the same command
-with `--report-only` added, retaining `--duration-s 170` and the label mapping.
-Saved 200 s results do not satisfy a request for a newly solved 170 s exposure.
+with `--report-only` added, retaining `--duration-s 500` and the label mapping.
+Saved shorter results do not satisfy a request for a newly solved 500 s exposure.
 
 ## Outputs and interpretation
 
