@@ -285,8 +285,12 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     mapdl.prep7()
     mapdl.et(1, "PLANE293")
     mapdl.keyopt(1, 1, 1)  # six-node triangle, unit out-of-plane thickness
-    for label, value in (("KXX", settings["k"]), ("KYY", settings["k"]), ("DENS", settings["rho"]), ("C", settings["cp"])):
-        mapdl.mp(label, 1, value)
+    if getattr(load, "material_law", None) is not None:
+        from .thermal_materials import apply_material
+        load.native_material = apply_material(mapdl, load.material_law, axes=settings["material_axes_2d"])
+    else:
+        for label, value in (("KXX", settings["k"]), ("KYY", settings["k"]), ("DENS", settings["rho"]), ("C", settings["cp"])):
+            mapdl.mp(label, 1, value)
     points = []
     for number, (x, y) in enumerate(load.xy, 1):
         points.append(int(mapdl.k("", float(x), float(y), 0)))
@@ -322,6 +326,7 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     if aerodynamic:
         from .thermal_energy import normalize_solid_connectivity, prepare_solid_energy
         triangles = normalize_solid_connectivity(nnum, xyz, mapdl.mesh.elem)
+        load.solid_triangles = triangles
         load.solid_energy_quadrature = prepare_solid_energy(nnum, xyz, triangles)
     if load.mode == "prescribed_temperature":
         _progress("Mapping the prescribed surface-temperature field onto the solid mesh")

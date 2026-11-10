@@ -1,0 +1,18 @@
+name: HGV Nose - Carbon-Carbon 2D (orthotropic)
+density_kg_m3: 1600.0
+temperature_c: [-17.594, 93.517, 204.628, 260.183, 537.961, 815.74, 1093.52, 1371.29, 1537.96, 1926.85]
+conductivity_w_mk:
+  x: [6.07, 7.87, 9.45, 9.9, 11.5, 11.9, 12.1, 11.9, 11.8, 11.7]
+  y: [6.07, 7.87, 9.45, 9.9, 11.5, 11.9, 12.1, 11.9, 11.8, 11.7]
+  z: [3.89, 5.05, 6.06, 6.35, 7.36, 7.65, 7.79, 7.65, 7.58, 7.49]
+specific_heat_j_kgk: [712, 879, 1000, 1090, 1300, 1420, 1550, 1670, 1720, 1840]
+extrapolation: error
+provenance:
+  source: 'COPY_files.zip :: COPY_files/dp0/SYS/ENGD/material.engd'
+  source_sha256: 42fa7732155557dde2cd470bf27ff0b2d88c528feae6f6cd9b0662b7a0987159
+  extraction: Engineering Data XML numeric tables; not screenshot estimates
+  stated_data_confidence: Mixed
+  source_workbook: 2026-11-05-hgv-ansys-materials.xlsx (not supplied)
+  material_directions: X/Y are fabric in-plane; Z is through-thickness
+  temperature_range_k: [255.556, 2200.0]
+  emissivity: Not supplied; no emissivity curve inferred from conductivity

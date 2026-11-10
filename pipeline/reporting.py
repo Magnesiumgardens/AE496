@@ -228,8 +228,8 @@ def _plotting():
     return plt
 
 
-def _save(fig, path, plt, dpi=160):
-    fig.tight_layout()
+def _save(fig, path, plt, dpi=160, *, rect=None):
+    fig.tight_layout(rect=rect)
     fig.savefig(path, dpi=dpi)
     plt.close(fig)
     return str(path)

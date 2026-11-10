@@ -21,12 +21,39 @@ class SolidEnergyQuadrature:
     nodal_volume_weights_m2: np.ndarray
     area_m2: float
     element_count: int
+    integration_samples: tuple = ()
 
-    def stored_energy_change(self, temperatures, initial_temperature, density, specific_heat):
-        """Return FE-integrated sensible energy relative to a uniform initial T."""
+    def stored_energy_change(self, temperatures, initial_temperature, density, specific_heat, material_law=None):
+        """Integrate sensible energy relative to the uniform initial state.
+
+        For a temperature-dependent material, evaluate its enthalpy integral
+        at the FE-interpolated quadrature temperatures. Interpolating nodal
+        enthalpies instead would give a different, generally incorrect field.
+        The original constant-cp path is retained exactly when no law is given.
+        """
         values = np.asarray(temperatures, dtype=float)
         if values.shape[-1:] != (len(self.node_numbers),) or not np.isfinite(values).all():
             raise ThermalAnalysisError("Solid temperatures do not match the stored-energy mesh.")
+        if material_law is not None:
+            try:
+                expected_density = float(material_law.density)
+                actual_density = float(density)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ThermalAnalysisError("Stored-energy material must define a finite positive density") from exc
+            if (not np.isfinite([actual_density, expected_density]).all()
+                    or min(actual_density, expected_density) <= 0
+                    or not np.isclose(actual_density, expected_density, rtol=1e-10, atol=1e-12)):
+                raise ThermalAnalysisError("Stored-energy density differs from the configured material law")
+            if not self.integration_samples:
+                raise ThermalAnalysisError("Temperature-dependent stored energy requires FE quadrature samples")
+            energy = np.zeros(values.shape[:-1], dtype=float)
+            for indices, shape, weights in self.integration_samples:
+                quadrature_temperature = values[..., indices] @ shape.T
+                enthalpy = np.asarray(material_law.enthalpy_change(quadrature_temperature, initial_temperature), dtype=float)
+                if enthalpy.shape != quadrature_temperature.shape or not np.isfinite(enthalpy).all():
+                    raise ThermalAnalysisError("Material returned invalid sensible enthalpy at FE quadrature temperatures")
+                energy += actual_density * (enthalpy @ weights)
+            return energy
         return density * specific_heat * ((values - initial_temperature) @ self.nodal_volume_weights_m2)
 
 
@@ -145,6 +172,7 @@ def prepare_solid_energy(nnum, xyz, triangle_node_ids):
     index_by_number = {int(node): index for index, node in enumerate(numbers)}
     shape, dr, ds, reference_weights = _triangle_rule()
     volume_weights = np.zeros(len(numbers), dtype=float)
+    integration_samples = []
     seen = set()
     area = 0.
     for triangle in triangles:
@@ -167,13 +195,14 @@ def prepare_solid_energy(nnum, xyz, triangle_node_ids):
         weights = reference_weights * np.abs(determinant)
         area += float(np.sum(weights))
         np.add.at(volume_weights, indices, weights @ shape)
+        integration_samples.append((indices.copy(), shape.copy(), weights.copy()))
     if not np.isfinite(area) or area <= 0 or not np.isclose(volume_weights.sum(), area, rtol=1e-11, atol=1e-20):
         raise ThermalAnalysisError("Stored-energy volume weights do not reproduce the solid area.")
-    return SolidEnergyQuadrature(numbers.copy(), volume_weights, area, len(triangles))
+    return SolidEnergyQuadrature(numbers.copy(), volume_weights, area, len(triangles), tuple(integration_samples))
 
 
 def evaluate_energy_balance(quadrature, times, temperatures, powers, settings,
-                            relative_tolerance=.02, absolute_tolerance_J_m=1e-3):
+                            relative_tolerance=.02, absolute_tolerance_J_m=1e-3, material_law=None):
     """Compare solved stored energy to every native backward-Euler substep.
 
     Histories include the uniform initial state at ``times[0] == 0`` and every
@@ -187,15 +216,23 @@ def evaluate_energy_balance(quadrature, times, temperatures, powers, settings,
     almost-cancelled net energy near equilibrium.  Step and cumulative checks
     are both retained; neither a final-only match nor a fitted correction can
     conceal an earlier energy-balance failure.
+
+    A supplied material law replaces rho*cp*(T-T0) with the physical sensible
+    enthalpy integral. Native MP,C temperature-dependent capacity discretization
+    need not conserve that integral exactly over a finite time step. A failed
+    check requires investigating/refining the native time integration; this
+    function does not relax its tolerance or substitute endpoint cp to pass.
     """
     times = np.asarray(times, dtype=float)
     temperatures = np.asarray(temperatures, dtype=float)
     powers = np.asarray(powers, dtype=float)
     try:
-        density, heat_capacity, initial = (float(settings[key]) for key in ("rho", "cp", "initial_t"))
+        density, initial = (float(settings[key]) for key in ("rho", "initial_t"))
+        heat_capacity = (float(settings["cp"]) if material_law is None
+                         else float(material_law.specific_heat(initial)))
         relative_tolerance, absolute_tolerance_J_m = float(relative_tolerance), float(absolute_tolerance_J_m)
     except (KeyError, TypeError, ValueError) as exc:
-        raise ThermalAnalysisError("Energy verification requires constant positive density, heat capacity and initial temperature.") from exc
+        raise ThermalAnalysisError("Energy verification requires positive density, heat capacity and initial temperature.") from exc
     if (not np.isfinite([density, heat_capacity, initial, relative_tolerance, absolute_tolerance_J_m]).all()
             or min(density, heat_capacity, initial, absolute_tolerance_J_m) <= 0
             or relative_tolerance <= 0 or relative_tolerance >= 1):
@@ -211,7 +248,7 @@ def evaluate_energy_balance(quadrature, times, temperatures, powers, settings,
             or not np.allclose(powers[:, 2], powers[:, 0] - powers[:, 1], rtol=1e-10, atol=1e-8)):
         raise ThermalAnalysisError("Energy verification requires finite, consistent convection/radiation/net surface powers.")
 
-    stored = quadrature.stored_energy_change(temperatures, initial, density, heat_capacity)
+    stored = quadrature.stored_energy_change(temperatures, initial, density, heat_capacity, material_law=material_law)
     dt = np.diff(times)
     implicit_steps = dt[:, None] * powers[1:]
     trapezoidal_steps = dt[:, None] * .5 * (powers[1:] + powers[:-1])
@@ -276,4 +313,12 @@ def evaluate_energy_balance(quadrature, times, temperatures, powers, settings,
         "worst_step_time_s": float(times[worst_index + 1]),
         "native_internal_energy_balance_verified": passed,
     }
+    if material_law is not None:
+        summary.update(
+            heat_capacity_model="temperature_dependent_sensible_enthalpy",
+            stored_energy_integration="rho times integral(cp dT) at six-node FE-interpolated Gaussian quadrature temperatures; unit span",
+            material_temperature_range_K=material_law.temperature_range_K,
+            material_extrapolation=material_law.extrapolation,
+            native_capacity_discretization="Finite native MP,C steps may need refinement to satisfy the physical enthalpy balance; tolerances are unchanged",
+        )
     return rows, summary

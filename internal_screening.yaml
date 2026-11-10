@@ -1,0 +1,23 @@
+# Separate full 2-D solid screening; existing tungsten outputs are retained.
+material_file: ./materials/reference_carbon_carbon_2d.yaml
+# This explicitly holds endpoint properties outside 255.556--2200 K. The
+# resulting range exceedance is reported and qualifies the screening result.
+material_extrapolation: hold_endpoint
+# Required physical choices: set here or supply CLI flags. No silent guess.
+depth_mode: null  # axial_tip OR surface_normal
+material_axes_2d: null  # e.g. [x, z]: material X along global X, Z along global Y
+depth_m: 0.010
+require_min_surface_clearance: true
+limit_temperature_k: 1800.0  # original requested screen; set 1873.15 to use the slide's limit
+reference_limit_temperature_k: 1873.15
+reference_crossing_time_s: 143.0  # displayed only if the screening limit matches
+reference_description: 'MK3 slide: Mach 8 for 0-85 s, Mach 7 for 85-170 s; a different flight history from this constant-Mach-8 model'
+initial_temperature_k: 300.0
+duration_s: 200.0
+initial_time_step_s: 0.001
+min_time_step_s: 0.000001
+max_time_step_s: 0.5
+mesh_size_m: 0.0005
+mapdl_version: 251
+processors: 4
+mapdl_start_timeout_s: 120

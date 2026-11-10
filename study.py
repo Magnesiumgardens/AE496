@@ -37,6 +37,15 @@ def main():
     peak_flux.add_argument("--geometry-dir", help="Select CAD cases from this folder; auto-detects geometry_batch beside runs")
     peak_flux.add_argument("--geometry-glob", default="*.x_t", help="CAD filename pattern, as in batch.yaml")
     peak_flux.add_argument("--cases", nargs="+", help="Case-insensitive CAD/case names or wildcard patterns, e.g. '*mk3*' '*mk4*'")
+    internal = commands.add_parser("internal-compare", help="Solve internal heating from saved Mach-8 loads, or replot saved internal results")
+    internal.add_argument("--runs-dir", default="runs")
+    internal.add_argument("--screening-config", default="internal_screening.yaml")
+    internal.add_argument("--geometry-dir", help="CAD selection folder; defaults to geometry_batch beside runs when present")
+    internal.add_argument("--cases", nargs="+", help="Case-insensitive names or wildcards, e.g. '*mk3*' '*mk4*'")
+    internal.add_argument("--depth-mode", choices=("axial_tip", "surface_normal"), help="Override the explicit probe convention in the screening YAML")
+    internal.add_argument("--material-axes", nargs=2, choices=("x", "y", "z"), help="Material directions mapped to global X and Y, respectively")
+    internal.add_argument("--output-dir")
+    internal.add_argument("--report-only", action="store_true", help="Check receipts and regenerate plots without MAPDL")
     export = commands.add_parser("export", help="Export solved wall temperatures and forces from the selected CFD case")
     export.add_argument("--config", required=True)
     export.add_argument("--inspect-fields", action="store_true")
@@ -49,6 +58,15 @@ def main():
     migrate.add_argument("--thermal-config",help="Also back up and convert a separate Mechanical YAML")
     commands.add_parser("update", help="Fetch the study branch through Git and update with backups")
     args = parser.parse_args()
+    if args.command == "internal-compare":
+        from pipeline.internal_screening import compare_internal
+        try:
+            result = compare_internal(args.runs_dir, args.screening_config, geometry_dir=args.geometry_dir,
+                cases=args.cases, output_dir=args.output_dir, depth_mode=args.depth_mode,
+                material_axes=args.material_axes, report_only=args.report_only)
+        except (OSError, ValueError, RuntimeError) as exc:
+            parser.error(str(exc))
+        return 0 if result["status"] == "complete" else 2
     if args.command == "calibration-status":
         import json
         from pipeline.config import load_config

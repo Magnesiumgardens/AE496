@@ -55,7 +55,8 @@ def save_surface_energy(output, load, wall_history, all_temperatures, times, set
     if quadrature is not None:
         from .thermal_energy import evaluate_energy_balance
         from .utils import atomic_json
-        solid_rows, balance = evaluate_energy_balance(quadrature, times, all_temperatures, powers, settings)
+        solid_rows, balance = evaluate_energy_balance(quadrature, times, all_temperatures, powers, settings,
+            material_law=getattr(load, "material_law", None))
         write_csv(output / "solid_energy_history.csv", solid_rows)
         atomic_json(output / "energy_balance.json", balance)
         load.energy_balance = balance

@@ -2,6 +2,12 @@
 
 A planar 2-D Ansys 2025 R1 study: **mesh → primary radiating-wall CFD + cold-wall calibration → temperature-dependent surface heating → transient Mechanical APDL conduction → per-nose and comparison plots**.
 
+The separate [internal-heating comparison](docs/internal_heating_comparison.md)
+uses the supplied temperature-dependent carbon–carbon properties and existing
+Mach-8 heating to compare solved temperatures at an explicitly defined 10 mm
+depth against a 1800 K screening limit. It writes new `internal_analysis`
+outputs and supports plot regeneration without rerunning CFD or Mechanical.
+
 ## What the current model calculates
 
 Fluent solves a steady compressible gas energy field with an external-radiation wall condition. The approximate local balance is `q_gas = emissivity × sigma × (Tw⁴ − T_environment⁴)`. Fluent solves the equilibrium surface temperature `Tw(s)`; it does not hold the wall at 300 K or set its heat flux to zero. External wall radiation does not require a volumetric gas-radiation model.
