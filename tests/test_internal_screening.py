@@ -1,6 +1,7 @@
 """Internal screening contracts; no licensed Ansys engine is simulated here."""
 import copy
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import sys
@@ -62,6 +63,15 @@ class InternalRunnerTests(unittest.TestCase):
         self.assertEqual(result["critical_probe_id"], "b")
         self.assertEqual(each[0]["status"], "not_reached_within_duration")
         self.assertEqual(result["peak_temperature_K"], 2200.)
+
+    def test_duration_override_changes_the_physical_exposure_without_editing_config(self):
+        path = ROOT / "internal_screening.yaml"
+        original = path.read_bytes()
+        _,_,_,settings,_ = screening_settings(path,depth_mode="axial_tip",material_axes=["x","z"],duration_s=170.)
+        self.assertEqual(settings["duration"],170.)
+        self.assertEqual(path.read_bytes(),original)
+        with self.assertRaises(ThermalAnalysisError):
+            screening_settings(path,depth_mode="axial_tip",material_axes=["x","z"],duration_s=0.)
 
     def test_native_tabulated_material_retains_convection_radiation_and_free_solid_temperature(self):
         load = load_fixture([[0., 0.], [1., 0.], [0., 1.]])
@@ -237,6 +247,25 @@ class InternalRunnerTests(unittest.TestCase):
                 second = compare_internal(root / "runs", config_path, report_only=True)
             rerun.assert_not_called()
             self.assertEqual(second["rows"], first["rows"])
+            partner = root / "runs/mk4"
+            (partner / "_batch").mkdir(parents=True)
+            (partner / "_batch/config.yaml").write_text("{}")
+            shutil.copytree(output, partner / "internal_analysis")
+            other = copy.deepcopy(receipt)
+            other.update(case="mk4", screening={**receipt["screening"], "design":"mk4"})
+            atomic_json(partner / "internal_analysis/internal_summary.json", other)
+            unchanged = {p:p.read_bytes() for p in (output / "internal_summary.json", partner / "internal_analysis/internal_summary.json")}
+            def per_case_inputs(path, *args):
+                return ({"project":{"work_dir":str(Path(path).parent.parent)}}, *inputs[1:])
+            with patch("pipeline.internal_screening._case_inputs", side_effect=per_case_inputs), \
+                 patch("pipeline.internal_screening.run_internal_case") as rerun:
+                swapped = compare_internal(root / "runs",config_path,report_only=True,swap_labels=["mk3","mk4"])
+            rerun.assert_not_called()
+            self.assertEqual(swapped["case_count"],2)
+            self.assertEqual([(r["source_case"],r["design"]) for r in swapped["rows"]],[("mk3","mk4"),("mk4","mk3")])
+            self.assertEqual(swapped["display_name_overrides"],{"mk3":"mk4","mk4":"mk3"})
+            for p,data in unchanged.items():self.assertEqual(p.read_bytes(),data)
+            shutil.rmtree(partner)
             for name in ("internal_temperature_history_comparison.png", "peak_internal_temperature_comparison.png",
                          "time_to_internal_limit_comparison.png"):
                 self.assertGreater((root / "runs/comparison/internal_heating" / name).stat().st_size, 1000)

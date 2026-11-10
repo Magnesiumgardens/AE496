@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import fnmatch
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,9 +38,10 @@ def native_launch_options(options, processors=None):
     return parallel, dict(nproc=int(count), additional_switches="-smp" if parallel == "smp" else "-dis")
 
 
-def screening_settings(config_path, *, depth_mode=None, material_axes=None):
+def screening_settings(config_path, *, depth_mode=None, material_axes=None, duration_s=None):
     path = Path(config_path).resolve()
     cfg = load_yaml(path)
+    if duration_s is not None:cfg["duration_s"] = positive("--duration-s", duration_s)
     mode = depth_mode or cfg.get("depth_mode")
     axes = material_axes or cfg.get("material_axes_2d")
     if not isinstance(mode, str) or mode not in {"axial_tip", "surface_normal"}:
@@ -108,12 +110,12 @@ def _signature(calibration, settings, material_cfg):
                 settings=settings, material=material_cfg)
 
 
-def _case_inputs(case_config, screening_config, depth_mode=None, material_axes=None):
+def _case_inputs(case_config, screening_config, depth_mode=None, material_axes=None, duration_s=None):
     cfg = load_config(case_config)
     if not np.isclose(float(cfg["flight"]["mach"]), 8., rtol=0, atol=1e-8):
         raise ThermalAnalysisError("This comparison uses existing Mach-8 calibration only; no flight sweep is performed")
     options, material_cfg, law, settings, material_path = screening_settings(screening_config,
-        depth_mode=depth_mode, material_axes=material_axes)
+        depth_mode=depth_mode, material_axes=material_axes, duration_s=duration_s)
     boundary, calibration = verify_surface_package(cfg)
     settings.update(emissivity=float(calibration["radiation"]["emissivity"]),
                     trad=float(calibration["radiation"]["external_radiation_temperature_K"]),
@@ -166,8 +168,8 @@ def _probes(load, settings, direction):
         x_m=float(point[0]), y_m=float(point[1]), nearest_heated_surface_distance_m=clearance)], excluded=[])
 
 
-def run_internal_case(case_config, screening_config, *, depth_mode=None, material_axes=None, processors=None):
-    cfg, options, law, material_path, boundary, snapshot = _case_inputs(case_config, screening_config, depth_mode, material_axes)
+def run_internal_case(case_config, screening_config, *, depth_mode=None, material_axes=None, processors=None, duration_s=None):
+    cfg, options, law, material_path, boundary, snapshot = _case_inputs(case_config, screening_config, depth_mode, material_axes, duration_s)
     settings = snapshot["settings"]
     parallel, launch = native_launch_options(options, processors)
     load = read_load(boundary)
@@ -255,9 +257,10 @@ def run_internal_case(case_config, screening_config, *, depth_mode=None, materia
 
 
 def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=None, output_dir=None,
-                     depth_mode=None, material_axes=None, report_only=False, processors=None):
+                     depth_mode=None, material_axes=None, report_only=False, processors=None, swap_labels=None,
+                     duration_s=None):
     # Required physical choices are checked even for report regeneration.
-    options, _, _, settings, _ = screening_settings(screening_config, depth_mode=depth_mode, material_axes=material_axes)
+    options, _, _, settings, _ = screening_settings(screening_config, depth_mode=depth_mode, material_axes=material_axes, duration_s=duration_s)
     native_launch_options(options, processors)  # Validate before starting any case.
     runs = Path(runs_dir).resolve()
     if not runs.is_dir():raise ThermalAnalysisError(f"Runs directory does not exist: {runs}")
@@ -270,6 +273,14 @@ def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=Non
         inventory, geometry = [], None
     if not candidates:
         raise ThermalAnalysisError("No case folders selected; check --runs-dir, --geometry-dir and --cases")
+    display_names = {work.name:work.name for work in candidates}
+    if swap_labels is not None:
+        selected = {name.casefold():name for name in display_names}
+        if len(swap_labels) != 2 or any(name.casefold() not in selected for name in swap_labels):
+            raise ThermalAnalysisError("Both --swap-labels names must match selected case folders")
+        a, b = [selected[name.casefold()] for name in swap_labels]
+        if a == b:raise ThermalAnalysisError("Choose two different case names to swap")
+        display_names[a], display_names[b] = b, a
     selected_cad = {item["case"].casefold():item["geometry_file"] for item in inventory if item["status"] != "not_selected"}
     output = Path(output_dir).resolve() if output_dir else runs / "comparison/internal_heating"
     output.mkdir(parents=True, exist_ok=True)
@@ -278,10 +289,13 @@ def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=Non
     for name in ("peak_internal_temperature_comparison", "time_to_internal_limit_comparison"):
         for suffix in (".csv", ".png"):(output / (name + suffix)).unlink(missing_ok=True)
     (output / "internal_temperature_history_comparison.png").unlink(missing_ok=True)
+    surface_output = output / "surface_loads"
+    if surface_output.is_dir():shutil.rmtree(surface_output)
+    surface_sources = {}
     rows, histories, excluded, signature = [], {}, [], None
     for work in candidates:
         try:
-            case_cfg, _, _, _, _, current = _case_inputs(work / "_batch/config.yaml", screening_config, depth_mode, material_axes)
+            case_cfg, _, _, _, _, current = _case_inputs(work / "_batch/config.yaml", screening_config, depth_mode, material_axes, duration_s)
             if case_cfg is not None and Path(case_cfg["project"]["work_dir"]).resolve() != work.resolve():
                 raise ThermalAnalysisError("Case configuration work_dir points at a different nose folder")
             if work.name.casefold() in selected_cad and file_sha256(selected_cad[work.name.casefold()]) != current["source_geometry_sha256"]:
@@ -307,14 +321,21 @@ def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=Non
                         saved["coordinates_m"], saved["triangle_node_ids"], saved["temperatures_K"][-1], settings["limit_K"])
             else:
                 receipt = run_internal_case(work / "_batch/config.yaml", screening_config,
-                    depth_mode=depth_mode, material_axes=material_axes, processors=processors)
+                    depth_mode=depth_mode, material_axes=material_axes, processors=processors, duration_s=duration_s)
             if receipt.get("energy_balance", {}).get("status") != "passed":raise ThermalAnalysisError("Internal energy check is not passed")
             from .reporting import read_csv
             history = read_csv(work / "internal_analysis/internal_worst_temperature_history.csv")
             if not history:raise ThermalAnalysisError("Saved internal history is empty")
-            rows.append(receipt["screening"])
+            # Plot the actual C/C transient's saved loads, never the separate
+            # legacy thermal_analysis folder. Derived files have their own folder.
+            source = {kind:[dict(row, source_case=work.name) for row in read_csv(work / "internal_analysis" / filename)]
+                      for kind,filename in (("flux","surface_heat_flux_history.csv"),
+                                            ("energy","surface_energy_history.csv"), ("global","global_energy_history.csv"))}
+            source["nose_direction"] = receipt["settings"]["nose_direction"]
+            rows.append(dict(receipt["screening"], source_case=work.name, design=display_names[work.name]))
             signature = receipt["comparison_signature"]
-            histories[work.name] = history
+            histories[display_names[work.name]] = history
+            surface_sources[display_names[work.name]] = source
         except (OSError, ValueError, RuntimeError, ImportError, KeyError, TypeError) as exc:
             excluded.append(dict(case=work.name, reason=str(exc)))
             print(f"[internal] {work.name}: excluded: {exc}", flush=True)
@@ -322,6 +343,12 @@ def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=Non
     if reference_time is not None and not np.isclose(settings["limit_K"], options["reference_limit_temperature_k"], rtol=0, atol=1e-8):
         reference_time = None
     files = screening_bar_outputs(rows, output, limit_K=settings["limit_K"], reference_time_s=reference_time) if rows else {}
+    if surface_sources:
+        from .reporting import _surface_load_history_outputs
+        files["surface_loads"] = _surface_load_history_outputs(surface_sources, surface_output)
+        for name,source in surface_sources.items():
+            work = runs / next(row["source_case"] for row in rows if row["design"] == name)
+            _surface_load_history_outputs({name:source}, work / "internal_analysis/plots")
     if histories:
         plt = _plotting()
         fig, ax = plt.subplots(figsize=(10, 6))
@@ -335,6 +362,7 @@ def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=Non
     result = dict(status="complete" if rows and not excluded else "partial" if rows else "unavailable",
         case_count=len(rows), rows=rows, excluded=excluded, files=files,
         geometry_directory=geometry, geometry_inventory=inventory,
+        display_name_overrides={name:label for name,label in display_names.items() if name != label},
         comparison_signature=signature,
         reference=dict(time_s=options.get("reference_crossing_time_s"), limit_temperature_K=options.get("reference_limit_temperature_k"),
             description=options.get("reference_description"), time_line_displayed=reference_time is not None,

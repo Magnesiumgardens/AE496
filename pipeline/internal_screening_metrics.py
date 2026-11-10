@@ -105,13 +105,15 @@ def screening_bar_outputs(rows, output_dir, limit_K=1800., reference_time_s=None
     plt = _plotting()
     colors = [plt.get_cmap("tab10")(i % 10) for i in range(len(records))]
     positions = np.arange(len(records))
+    durations = {row["duration_s"] for row in records}
+    exposure = f" (0–{next(iter(durations)):g} s)" if len(durations) == 1 else ""
     fig, ax = plt.subplots(figsize=(max(8, 1.3 * len(records)), 5))
     bars = ax.bar(positions, [row["peak_temperature_K"] for row in records], color=colors)
     ax.bar_label(bars, labels=[f"{row['peak_temperature_K']:,.1f} K" for row in records], padding=4)
     ax.axhline(limit, color="firebrick", linestyle="--", label=f"Screening limit: {limit:g} K")
     ax.set_xticks(positions, [row["design"] for row in records], rotation=25, ha="right")
     ax.set(ylabel="Peak internal temperature [K]", xlabel="Nose geometry",
-           title=f"Peak Internal Temperature at {depths[0] * 1000:g} mm Depth")
+           title=f"Peak Internal Temperature at {depths[0] * 1000:g} mm Depth{exposure}")
     ax.set_ylim(0, max(limit, max(row["peak_temperature_K"] for row in records)) * 1.15)
     ax.grid(axis="y", alpha=.3); ax.set_axisbelow(True); ax.legend(fontsize=9)
     extended = [row["design"] for row in records if row.get("material_extrapolation_used")]
