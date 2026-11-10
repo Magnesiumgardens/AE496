@@ -1,0 +1,116 @@
+# encoding: utf-8
+# 2025 R1
+SetScriptVersion(Version="25.1.122")
+system1 = GetSystem(Name="SYS")
+engineeringData1 = system1.GetContainer(ComponentName="Engineering Data")
+material1 = engineeringData1.GetMaterial(Name="HGV Front Body - Inconel 601")
+material1.Delete()
+material2 = engineeringData1.GetMaterial(Name="HGV Back Body - Ti3Al alpha2 (ESTIMATED)")
+material2.Delete()
+material3 = engineeringData1.GetMaterial(Name="HGV Sandwich Panel - Rene 41")
+material3.Delete()
+material4 = engineeringData1.GetMaterial(Name="HGV Boat Tail - AlBeMet AM162")
+material4.Delete()
+material5 = engineeringData1.GetMaterial(Name="HGV Nose - Carbon-Carbon 2D (orthotropic)")
+material5.Delete()
+material6 = engineeringData1.GetMaterial(Name="HGV Fins - Inconel 718")
+material6.Delete()
+material7 = engineeringData1.GetMaterial(Name="HGV Front Body - Inconel 601 2")
+material7.Delete()
+material8 = engineeringData1.GetMaterial(Name="HGV Insulation - Pyrogel HPS")
+material8.Delete()
+favorites1 = EngData.LoadFavoriteItems()
+library1 = EngData.OpenLibrary(
+    Name="HGV_Thermal_Only_Test",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl1 = engineeringData1.ImportMaterial(
+    Name="HGV Back Body - Ti3Al alpha2 (ESTIMATED)",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl2 = engineeringData1.ImportMaterial(
+    Name="HGV Boat Tail - AlBeMet AM162",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl3 = engineeringData1.ImportMaterial(
+    Name="HGV Fins - Inconel 718",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl4 = engineeringData1.ImportMaterial(
+    Name="HGV Insulation - Pyrogel HPS",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl5 = engineeringData1.ImportMaterial(
+    Name="HGV Front Body - Inconel 601",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl6 = engineeringData1.ImportMaterial(
+    Name="HGV Nose - Carbon-Carbon 2D (orthotropic)",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+matl7 = engineeringData1.ImportMaterial(
+    Name="HGV Sandwich Panel - Rene 41",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_Test.xml")
+Save(Overwrite=True)
+EngData.EnableFilter(Enable=False)
+EngData.EnableFilter()
+EngData.EnableFilter(Enable=False)
+engineeringDataComponent1 = system1.GetComponent(Name="Engineering Data")
+engineeringDataComponent1.Update(AllDependencies=True)
+system2 = GetSystem(Name="SYS 1")
+modelComponent1 = system2.GetComponent(Name="Model")
+modelComponent1.Refresh()
+model1 = system2.GetContainer(ComponentName="Model")
+model1.Edit()
+matl5.Delete()
+matl1.Delete()
+matl2.Delete()
+matl4.Delete()
+matl7.Delete()
+matl6.Delete()
+matl3.Delete()
+library1.Close()
+library2 = EngData.OpenLibrary(
+    Name="HGV_Combined_Thermal_Structural_8_Materials",
+    Source="C:/Users/Matth/Downloads/HGV_Combined_Thermal_Structural_8_Materials.xml")
+library2.Close()
+library3 = EngData.OpenLibrary(
+    Name="HGV_Thermal_Only_With_Tungsten",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl8 = engineeringData1.ImportMaterial(
+    Name="HGV Back Body - Ti3Al alpha2 (ESTIMATED)",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl9 = engineeringData1.ImportMaterial(
+    Name="HGV Boat Tail - AlBeMet AM162",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl10 = engineeringData1.ImportMaterial(
+    Name="HGV Fins - Inconel 718",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl11 = engineeringData1.ImportMaterial(
+    Name="HGV Front Body - Inconel 601",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl12 = engineeringData1.ImportMaterial(
+    Name="HGV Insulation - Pyrogel HPS",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl13 = engineeringData1.ImportMaterial(
+    Name="HGV Nose - Carbon-Carbon 2D (orthotropic)",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl14 = engineeringData1.ImportMaterial(
+    Name="HGV Sandwich Panel - Rene 41",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+matl15 = engineeringData1.ImportMaterial(
+    Name="HGV Tungsten - Pure (preliminary thermal properties)",
+    Source="C:/Users/Matth/Downloads/HGV_Thermal_Only_With_Tungsten.xml")
+engineeringDataComponent1.Update(AllDependencies=True)
+modelComponent1.Refresh()
+model1.Edit()
+Save(Overwrite=True)
+Save(Overwrite=True)
+model1.Exit()
+geometry1 = system2.GetContainer(ComponentName="Geometry")
+geometry1.Edit(IsDiscoveryGeometry=True)
+geometry1.Exit()
+library4 = EngData.OpenLibrary(
+    Name="HGV_ZrB2_SiC_Coating_Standalone_PRELIMINARY",
+    Source="C:/Users/Matth/Downloads/HGV_ZrB2_SiC_Coating_Standalone_PRELIMINARY.xml")
+library4.Close()
+library5 = EngData.OpenLibrary(
+    Name="HGV_ZrB2_SiC_Coating_Thermal_Only",
+    Source="C:/Users/Matth/Downloads/HGV_ZrB2_SiC_Coating_Thermal_Only.xml")
+matl16 = engineeringData1.ImportMaterial(
+    Name="HGV Spray Coating - ZrB2 20vol% SiC (THERMAL ONLY)",
+    Source="C:/Users/Matth/Downloads/HGV_ZrB2_SiC_Coating_Thermal_Only.xml")
+Save(Overwrite=True)
