@@ -92,11 +92,29 @@ backward-Euler substep. Spatial integration across property-table knots is
 numerical. The existing conservation tolerance is retained. A failed check
 excludes the result; inspect `energy_balance.json` and refine time/mesh
 resolution rather than treating the numerical screen as validation.
-The new input starts at 0.001 s and allows automatic native steps up to
-0.5 s; these are starting controls, not demonstrated time independence.
+The new internal path starts at 0.001 s, caps native steps at **0.05 s for
+the first 5 s**, then allows steps up to 0.5 s. This targeted startup
+refinement responds to the first native MK3 runs: final energy differed by
+about 0.032%, but the worst individual step near 0.81 s exceeded tolerance.
+It is a refinement to test, not demonstrated time independence. The physical
+loads and temperature state continue across the two native load steps; there
+is no second initialization or change to Mach number. Result sets are read
+by global index across both load steps.
+`startup_duration_s` and `startup_max_time_step_s` control the early phase;
+setting startup duration to zero disables it. Existing internal YAML files
+that omit these fields use the 5 s / 0.05 s defaults, recorded in the receipt.
+The older thermal workflow keeps its existing single-phase behavior.
 If the enthalpy check fails near startup, reduce `initial_time_step_s`;
-for later failures also reduce `max_time_step_s`. Inspect the recorded worst
+also reduce `startup_max_time_step_s` when the failing time lies in startup.
+For later failures reduce `max_time_step_s`. Inspect the recorded worst
 step and energy terms before drawing physical conclusions.
+
+Messages saying that loads on unselected lines were not transferred at
+`SOLVE` refer to the deliberately blocked **second** solid-model transfer.
+Convection was already transferred to the solid before the radiation
+elements were created. These messages do not establish that convection is
+missing. Do not delete the line loads to silence them: MAPDL's `SFLDELE`
+also deletes their corresponding finite-element loads.
 
 ## Run on Windows
 
@@ -143,6 +161,18 @@ Omit `--cases` to evaluate every CAD case. Files must already have valid
 matched cold/RE calibration in their case folder; a changed or missing
 calibration is reported and requires the existing CFD/calibration workflow.
 The internal runner does not silently rerun Fluent or substitute another nose.
+
+When a case already has a valid saved primary RE solution but lacks
+`thermal_bc/surface_load_summary.json`, prepare that case's calibration
+directly, without running the aerodynamic export:
+
+```powershell
+.\.venv\Scripts\python.exe -u run_calibration.py --config .\runs\mk4_body_internals_blunt_nose_v2\_batch\config.yaml
+```
+
+This reuses valid cold-wall exports when available; otherwise it runs the
+required cold-wall calibration on that case's mesh. It requires the saved
+primary CFD case/data to exist and pass their existing checks.
 
 To regenerate plots from saved internal results, without a new MAPDL solve:
 

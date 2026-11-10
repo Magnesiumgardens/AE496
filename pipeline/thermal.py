@@ -279,7 +279,32 @@ def apply_prescribed_temperature(mapdl, lines, load, nnum, xyz, mesh_size):
     return selected, values
 
 
+def transient_schedule(settings):
+    """Absolute-time solve phases; only integration limits change between phases."""
+    duration = positive("duration", settings["duration"])
+    startup = float(settings.get("startup_duration", 0.))
+    if not np.isfinite(startup) or startup < 0:
+        raise ThermalAnalysisError("startup_duration must be finite and nonnegative")
+    normal_max = positive("dtmax", settings["dtmax"])
+    initial, minimum = positive("dt0", settings["dt0"]), positive("dtmin", settings["dtmin"])
+    if not minimum <= initial <= normal_max:
+        raise ThermalAnalysisError("Require minimum <= initial <= maximum time step")
+    if startup == 0:
+        return [(duration, initial, normal_max)]
+    startup_max = positive("startup_dtmax", settings["startup_dtmax"])
+    if not minimum <= startup_max <= normal_max:
+        raise ThermalAnalysisError("Startup maximum time step must lie between the minimum and normal maximum")
+    end = min(startup, duration)
+    if end < minimum:
+        raise ThermalAnalysisError("Startup phase duration must be at least the minimum time step")
+    phases = [(end, min(initial, startup_max), startup_max)]
+    if end < duration:
+        phases.append((duration, startup_max, normal_max))
+    return phases
+
+
 def solve_thermal(mapdl, load, settings, mesh_size):
+    schedule = transient_schedule(settings)
     _progress(f"Reconstructing solid from {len(load.xy)} CFD boundary vertices")
     mapdl.clear()
     mapdl.prep7()
@@ -348,8 +373,6 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     mapdl.tunif(settings["initial_t"])
     mapdl.kbc(1)
     mapdl.autots("ON")
-    mapdl.time(settings["duration"])
-    mapdl.deltim(settings["dt0"], settings["dtmin"], settings["dtmax"])
     mapdl.outres("ALL", "ALL")
     mapdl.neqit(100)
     if settings["include_rad"]:
@@ -357,10 +380,13 @@ def solve_thermal(mapdl, load, settings, mesh_size):
         # CONV was already transferred to PLANE293 before adding SURF151.
         # Prevent transferring it a second time onto the radiation overlay.
         mapdl.lsel("NONE")
-    _progress(f"Solving {len(nnum)} nodes / {n_elements} elements for {settings['duration']:g} s; streaming MAPDL output")
-    message = str(mapdl.solve(verbose=True))
-    if "*** ERROR ***" in message.upper():
-        raise ThermalAnalysisError("MAPDL solve failed:\n" + message[-5000:])
+    for end, initial_step, max_step in schedule:
+        mapdl.time(end)
+        mapdl.deltim(initial_step, settings["dtmin"], max_step)
+        _progress(f"Solving {len(nnum)} nodes / {n_elements} elements to {end:g} s; maximum time step={max_step:g} s; streaming MAPDL output")
+        message = str(mapdl.solve(verbose=True))
+        if "*** ERROR ***" in message.upper():
+            raise ThermalAnalysisError("MAPDL solve failed:\n" + message[-5000:])
     mapdl.finish()
     mapdl.post1()
     # Open the result file before querying ACTIVE,SET,NSET metadata.
@@ -372,7 +398,10 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     _progress(f"Reading {nsets} thermal result sets")
     temperatures = []
     for number in range(1, nsets + 1):
-        mapdl.set(1, number)  # single transient load step
+        if len(schedule) > 1:
+            mapdl.set(nset=number)  # Global result index across both load steps.
+        else:
+            mapdl.set(1, number)
         if settings["include_rad"]:
             from .thermal_radiation import select_solid_results
             select_solid_results(mapdl, nnum)

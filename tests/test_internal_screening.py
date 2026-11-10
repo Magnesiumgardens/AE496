@@ -15,7 +15,7 @@ from pipeline.internal_screening import (MODEL_VERSION, compare_internal, probe_
                                          screening_settings, _signature)
 from pipeline.aerothermal_loading import integrated_powers
 from pipeline.thermal_energy import prepare_solid_energy
-from pipeline.thermal import solve_thermal
+from pipeline.thermal import solve_thermal, transient_schedule
 from pipeline.thermal_loading import ThermalAnalysisError
 from pipeline.thermal_materials import from_material_config, apply_material
 from pipeline.utils import atomic_json, file_sha256
@@ -65,6 +65,45 @@ class InternalRunnerTests(unittest.TestCase):
         self.assertTrue(any(n == "sfl" and a[1] == "CONV" for n, a, _ in calls))
         self.assertEqual([a for n, a, _ in calls if n == "d"], [(7, "TEMP", 3.)])
         self.assertEqual(load.solid_triangles.shape, (1, 6))
+
+    def test_startup_refinement_continues_one_state_and_reads_both_native_load_steps(self):
+        load = load_fixture([[0., 0.], [1., 0.], [0., 1.]])
+        numbers, xyz = quadratic_boundary(load)
+        class MultiStepAdapter(SurfaceMeshAdapter):
+            def __getattr__(self, name):
+                if name != "set":return super().__getattr__(name)
+                def select(*args, **kwargs):
+                    self.calls.append((name, args, kwargs))
+                    if args != ("LAST",):
+                        if "nset" not in kwargs:raise AssertionError("Results must use global indices across load steps")
+                        self.active_set = kwargs["nset"]
+                return select
+        engine = MultiStepAdapter(numbers, xyz, lines=(1,2,3))
+        engine.post_processing.nsets = 4
+        engine.post_processing.time_values = [.05,5.,5.05,200.]
+        engine.post_processing.nodal_temperature = lambda:np.full(6,[310.,400.,410.,500.][engine.active_set-1])
+        _, _, config = settings(duration=200.)
+        config.update(startup_duration=5., startup_dtmax=.05, dtmin=.000001, dt0=.001, dtmax=.5)
+        _, _, temperatures, times, _ = solve_thermal(engine,load,config,.1)
+        self.assertEqual(times,[.05,5.,5.05,200.])
+        self.assertEqual([float(v[0]) for v in temperatures],[310.,400.,410.,500.])
+        self.assertEqual([a for n,a,k in engine.calls if n == "time"],[(5.,),(200.,)])
+        self.assertEqual([a for n,a,k in engine.calls if n == "deltim"],[(.001,.000001,.05),(.05,.000001,.5)])
+        self.assertEqual(sum(n == "solve" for n,a,k in engine.calls),2)
+        self.assertEqual(sum(n == "tunif" for n,a,k in engine.calls),1)
+        self.assertEqual(sum(n == "antype" for n,a,k in engine.calls),1)
+        self.assertEqual(sum(n == "sftran" for n,a,k in engine.calls),1)
+        self.assertEqual([a for n,a,k in engine.calls if n == "d"],[(7,"TEMP",3.)])
+
+    def test_short_exposure_has_no_duplicate_or_zero_length_phase(self):
+        config = dict(duration=2., dt0=.001, dtmin=.000001, dtmax=.5,
+                      startup_duration=5., startup_dtmax=.05)
+        self.assertEqual(transient_schedule(config),[(2.,.001,.05)])
+        config["startup_duration"] = 0.
+        self.assertEqual(transient_schedule(config),[(2.,.001,.5)])
+        config["startup_duration"] = .0000001
+        with self.assertRaisesRegex(ThermalAnalysisError,"Startup phase duration"):
+            transient_schedule(config)
 
     def test_different_noses_can_share_physics_signature_without_sharing_geometry_or_mesh(self):
         calibration = dict(conditions=dict(flight={"mach":8}, physics={"viscous_model":"laminar"},
@@ -119,7 +158,7 @@ class InternalRunnerTests(unittest.TestCase):
             options = yaml.safe_load((ROOT / "internal_screening.yaml").read_text())
             options.update(material_file=str(ROOT / "materials/reference_carbon_carbon_2d.yaml"),
                 depth_mode="axial_tip", material_axes_2d=["x","z"], duration_s=.2,
-                initial_time_step_s=.05, max_time_step_s=.1)
+                initial_time_step_s=.05, max_time_step_s=.1, startup_duration_s=0.)
             config_path.write_text(yaml.safe_dump(options))
             opts, material, law, config, material_path = screening_settings(config_path)
             config.update(emissivity=.9, trad=3., nose_direction=[1.,0.])

@@ -19,7 +19,7 @@ from .thermal_loading import ThermalAnalysisError, positive
 from .thermal_materials import from_material_config
 from .utils import atomic_json, file_sha256
 
-MODEL_VERSION = "1.0-internal-tabulated-material-screen"
+MODEL_VERSION = "1.1-startup-refined-internal-screen"
 
 
 def screening_settings(config_path, *, depth_mode=None, material_axes=None):
@@ -46,6 +46,13 @@ def screening_settings(config_path, *, depth_mode=None, material_axes=None):
         ("depth_m", "depth_m", .01), ("limit_K", "limit_temperature_k", 1800.))}
     if not settings["dtmin"] <= settings["dt0"] <= settings["dtmax"] <= settings["duration"]:
         raise ThermalAnalysisError("Require minimum <= initial <= maximum time step <= duration")
+    startup = float(cfg.get("startup_duration_s", 5.))
+    if not np.isfinite(startup) or startup < 0:
+        raise ThermalAnalysisError("startup_duration_s must be finite and nonnegative")
+    settings["startup_duration"] = min(startup, settings["duration"])
+    settings["startup_dtmax"] = positive("startup_max_time_step_s", cfg.get("startup_max_time_step_s", min(.05, settings["dtmax"])))
+    if startup and not settings["dtmin"] <= settings["startup_dtmax"] <= settings["dtmax"]:
+        raise ThermalAnalysisError("Startup maximum time step must lie between minimum and normal maximum")
     if not isinstance(cfg.get("require_min_surface_clearance", True), bool):
         raise ThermalAnalysisError("require_min_surface_clearance must be true or false")
     settings.update(initial_t=initial, rho=law.density, cp=float(law.specific_heat(initial)),
@@ -156,7 +163,7 @@ def run_internal_case(case_config, screening_config, *, depth_mode=None, materia
     receipt = dict(status="running", case=work.name, **snapshot, material_file=str(material_path),
         depth_mode=settings["depth_mode"], depth_m=settings["depth_m"], limit_temperature_K=settings["limit_K"],
         probe_definitions=probes["probes"], excluded_probes=probes["excluded"],
-        limitations=["1800 K is a supplied screening limit, not a validated structural-failure model.",
+        limitations=["The selected temperature is a screening limit, not a validated structural-failure model.",
             "The supplied 143 s value is a reference, not a calibration target.",
             "Material axes are fixed global directions; they do not automatically follow a curved fabric surface.",
             "Laminar planar Mach-8 CFD heating is one-way coupled; no oxidation, ablation, coating or trajectory is added.",
@@ -182,7 +189,11 @@ def run_internal_case(case_config, screening_config, *, depth_mode=None, materia
         save_results(output, load, nnum, xyz, values, times, settings, mesh_size)
         receipt["energy_balance"] = load.energy_balance
         if load.energy_balance["status"] != "passed":
-            raise ThermalAnalysisError("Physical enthalpy energy check failed; refine native time steps before using this comparison. See energy_balance.json")
+            balance = load.energy_balance
+            raise ThermalAnalysisError(f"Physical enthalpy energy check failed: worst step at {balance['worst_step_time_s']:g} s, "
+                f"error/tolerance={balance['maximum_step_error_to_tolerance']:.4g}; "
+                f"final balance passed={balance['final_balance_passed']}, signs passed={balance['energy_sign_passed']}. "
+                f"Saved results retained. Inspect {output / 'energy_balance.json'} before using the comparison")
         interpolation = prepare_probe_interpolation(nnum, xyz, load.solid_triangles, probes["points"])
         internal = interpolation.evaluate(temperatures)
         history = [dict(design=work.name, time_s=float(t), probe_id=probe["probe_id"],
