@@ -100,6 +100,20 @@ step and energy terms before drawing physical conclusions.
 
 ## Run on Windows
 
+The filled example `internal_screening_carbon_carbon.yaml` uses the supplied
+C/C composite properties, a **10 mm axial offset behind the tip**, material
+axes **[x, z]** mapped to global X/Y, 300 K initial temperature, 200 s exposure
+and the slide's 1873.15 K limit. These are explicit example measurement/layup
+assumptions, not recovered probe definitions. The table represents the
+effective carbon–carbon composite, not its matrix constituent alone.
+
+After updating, run that example with:
+
+```powershell
+.\.venv\Scripts\python.exe -u study.py internal-compare --screening-config .\internal_screening_carbon_carbon.yaml --cases "*mk3*" "*mk4*"
+```
+
+The generic configuration below leaves the measurement and layup unselected.
 From the AE496 folder, update first:
 
 ```powershell

@@ -33,15 +33,17 @@ def update_project(root, source, revision=None):
         (name.endswith(".py") and ("/" not in name or name.startswith(("pipeline/", "scripts/", "tests/"))))
         or (name.startswith("scripts/") and name.endswith(".ps1"))
         or (name.startswith("materials/") and name.endswith((".yaml", ".json")))
-        or name in ("README.md", "NOSE_TRADE_README.md", "requirements.txt", "thermal_analysis.yaml", "internal_screening.yaml")
+        or name in ("README.md", "NOSE_TRADE_README.md", "requirements.txt", "thermal_analysis.yaml",
+                    "internal_screening.yaml", "internal_screening_carbon_carbon.yaml")
         or (name.startswith("docs/") and name.endswith((".md", ".png")))
         or name.startswith("tests/fixtures/")
         or name.startswith("examples/reference_results/")]
     payload = {name: git(source, "show", f"{revision}:{name}") for name in selected}
     # The screening input contains the user's probe convention and fabric-axis
     # choices. Install it once, then retain those choices across code updates.
-    if (root / "internal_screening.yaml").is_file():
-        payload.pop("internal_screening.yaml", None)
+    for name in ("internal_screening.yaml", "internal_screening_carbon_carbon.yaml"):
+        if (root / name).is_file():
+            payload.pop(name, None)
     for name, data in payload.items():
         if name.endswith(".py"):compile(data, name, "exec")
     config_paths = [root / "config.yaml", *sorted((root / "runs").glob("*/_batch/config.yaml"))]

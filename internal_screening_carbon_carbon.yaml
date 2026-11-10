@@ -1,0 +1,34 @@
+# Filled example using the C/C composite tables supplied in Engineering Data.
+# This describes the effective composite, not the carbon matrix constituent alone.
+material_file: ./materials/reference_carbon_carbon_2d.yaml
+# Explicit approximation beyond the supplied 255.556--2200 K property range.
+# Endpoint property values are held; temperatures are not clipped. Results flag use.
+material_extrapolation: hold_endpoint
+
+# Example measurement: 10 mm axially behind the forwardmost nose tip.
+# This is NOT necessarily 10 mm beneath the nearest heated surface.
+depth_mode: axial_tip
+depth_m: 0.010
+# Example fixed layup: material X (fabric) along model global X;
+# material Z (through-thickness) along model global Y. Check against your layup.
+# These directions do not rotate along a curved skin.
+material_axes_2d: [x, z]
+# Used only if depth_mode is changed to surface_normal.
+require_min_surface_clearance: true
+
+initial_temperature_k: 300.0
+duration_s: 200.0
+limit_temperature_k: 1873.15  # temperature criterion shown on the MK3 slide
+reference_limit_temperature_k: 1873.15
+reference_crossing_time_s: 143.0  # external reference only, never a fitting target
+reference_description: 'MK3 slide: Mach 8 for 0-85 s, Mach 7 for 85-170 s; this analysis remains at Mach 8 throughout'
+
+initial_time_step_s: 0.001
+min_time_step_s: 0.000001
+max_time_step_s: 0.5
+mesh_size_m: 0.0005
+mapdl_version: 251
+processors: 4
+mapdl_start_timeout_s: 120
+# H, driving temperature, emissivity and radiation ambient come from each
+# verified CFD calibration. This file does not supply or modify those values.
