@@ -45,6 +45,7 @@ def main():
     internal.add_argument("--depth-mode", choices=("axial_tip", "surface_normal"), help="Override the explicit probe convention in the screening YAML")
     internal.add_argument("--material-axes", nargs=2, choices=("x", "y", "z"), help="Material directions mapped to global X and Y, respectively")
     internal.add_argument("--output-dir")
+    internal.add_argument("--processors", type=int, help="Override the MAPDL core/thread count for this invocation")
     internal.add_argument("--report-only", action="store_true", help="Check receipts and regenerate plots without MAPDL")
     export = commands.add_parser("export", help="Export solved wall temperatures and forces from the selected CFD case")
     export.add_argument("--config", required=True)
@@ -63,7 +64,7 @@ def main():
         try:
             result = compare_internal(args.runs_dir, args.screening_config, geometry_dir=args.geometry_dir,
                 cases=args.cases, output_dir=args.output_dir, depth_mode=args.depth_mode,
-                material_axes=args.material_axes, report_only=args.report_only)
+                material_axes=args.material_axes, report_only=args.report_only, processors=args.processors)
         except (OSError, ValueError, RuntimeError) as exc:
             parser.error(str(exc))
         return 0 if result["status"] == "complete" else 2

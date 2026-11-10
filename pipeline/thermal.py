@@ -303,7 +303,8 @@ def transient_schedule(settings):
     return phases
 
 
-def solve_thermal(mapdl, load, settings, mesh_size):
+def solve_thermal(mapdl, load, settings, mesh_size, *, save_nodal_temperatures_only=False,
+                  model_database_file=None):
     schedule = transient_schedule(settings)
     _progress(f"Reconstructing solid from {len(load.xy)} CFD boundary vertices")
     mapdl.clear()
@@ -373,13 +374,24 @@ def solve_thermal(mapdl, load, settings, mesh_size):
     mapdl.tunif(settings["initial_t"])
     mapdl.kbc(1)
     mapdl.autots("ON")
-    mapdl.outres("ALL", "ALL")
+    if save_nodal_temperatures_only:
+        # All physical substeps remain available. Surface powers and solid
+        # enthalpy are calculated from nodal T and the verified mesh/load laws.
+        mapdl.outres("ALL", "NONE")
+        mapdl.outres("NSOL", "ALL")
+    else:
+        mapdl.outres("ALL", "ALL")
     mapdl.neqit(100)
     if settings["include_rad"]:
         # SOLVE automatically transfers solid-model loads on SELECTED lines.
         # CONV was already transferred to PLANE293 before adding SURF151.
         # Prevent transferring it a second time onto the radiation overlay.
         mapdl.lsel("NONE")
+    if model_database_file is not None:
+        _progress(f"Saving native model database: {model_database_file}.db")
+        response = str(mapdl.save(model_database_file, "db"))
+        if "*** ERROR ***" in response.upper():
+            raise ThermalAnalysisError("MAPDL model database save failed:\n" + response[-5000:])
     for end, initial_step, max_step in schedule:
         mapdl.time(end)
         mapdl.deltim(initial_step, settings["dtmin"], max_step)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import fnmatch
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,20 @@ from .thermal_materials import from_material_config
 from .utils import atomic_json, file_sha256
 
 MODEL_VERSION = "1.1-startup-refined-internal-screen"
+
+
+def native_launch_options(options, processors=None):
+    """Use explicit shared-memory execution unless DMP is deliberately selected."""
+    parallel = str(options.get("mapdl_parallel_mode", "smp")).strip().lower()
+    if parallel not in {"smp", "dmp"}:
+        raise ThermalAnalysisError("mapdl_parallel_mode must be smp or dmp")
+    raw = options.get("processors", 4) if processors is None else processors
+    if isinstance(raw, bool):
+        raise ThermalAnalysisError("processors must be a positive integer")
+    count = positive("processors", raw)
+    if not count.is_integer():
+        raise ThermalAnalysisError("processors must be a positive integer")
+    return parallel, dict(nproc=int(count), additional_switches="-smp" if parallel == "smp" else "-dis")
 
 
 def screening_settings(config_path, *, depth_mode=None, material_axes=None):
@@ -151,16 +166,24 @@ def _probes(load, settings, direction):
         x_m=float(point[0]), y_m=float(point[1]), nearest_heated_surface_distance_m=clearance)], excluded=[])
 
 
-def run_internal_case(case_config, screening_config, *, depth_mode=None, material_axes=None):
+def run_internal_case(case_config, screening_config, *, depth_mode=None, material_axes=None, processors=None):
     cfg, options, law, material_path, boundary, snapshot = _case_inputs(case_config, screening_config, depth_mode, material_axes)
     settings = snapshot["settings"]
+    parallel, launch = native_launch_options(options, processors)
     load = read_load(boundary)
     load.material_law = law
     probes = _probes(load, settings, settings["nose_direction"])  # Validate geometry before using a license.
     work = Path(cfg["project"]["work_dir"])
     output = work / "internal_analysis"
     output.mkdir(parents=True, exist_ok=True)
+    # Never mix a crashed run's partial files with a prior combined result.
+    native = output / "native_runs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    native.mkdir(parents=True)
     receipt = dict(status="running", case=work.name, **snapshot, material_file=str(material_path),
+        native_runtime=dict(parallel_mode=parallel, processors=launch["nproc"],
+            additional_switches=launch["additional_switches"], native_directory=str(native),
+            model_database=str(native / "internal_model.db"),
+            result_output="Nodal temperatures (NSOL) at every solved substep; element outputs disabled"),
         depth_mode=settings["depth_mode"], depth_m=settings["depth_m"], limit_temperature_K=settings["limit_K"],
         probe_definitions=probes["probes"], excluded_probes=probes["excluded"],
         limitations=["The selected temperature is a screening limit, not a validated structural-failure model.",
@@ -170,15 +193,17 @@ def run_internal_case(case_config, screening_config, *, depth_mode=None, materia
             "Emissivity is inherited from the existing CFD calibration, not inferred from the new material table."])
     atomic_json(output / "internal_summary.json", receipt)
     print(f"[internal] {work.name}: {settings['depth_mode']}, depth={settings['depth_m']*1000:g} mm, material={law.name}", flush=True)
+    print(f"[internal] MAPDL mode={parallel}, processors={launch['nproc']}; native files: {native}", flush=True)
     engine = None
     try:
         from ansys.mapdl.core import launch_mapdl
         engine = launch_mapdl(version=int(options.get("mapdl_version", 251)), mode="grpc",
-            nproc=int(options.get("processors", 4)), run_location=str(output), jobname="internal_nose",
+            **launch, run_location=str(native), jobname="internal_nose",
             start_timeout=positive("mapdl_start_timeout_s", options.get("mapdl_start_timeout_s", 120)),
-            log_apdl=str(output / "mapdl_commands.log"), mapdl_output=str(output / "mapdl_console.out"))
+            log_apdl=str(native / "mapdl_commands.log"), mapdl_output=str(native / "mapdl_console.out"))
         mesh_size = settings["mesh_size_m"]
-        nnum, xyz, values, times, elements = solve_thermal(engine, load, settings, mesh_size)
+        nnum, xyz, values, times, elements = solve_thermal(engine, load, settings, mesh_size,
+            save_nodal_temperatures_only=True, model_database_file="internal_model")
         temperatures = np.vstack([np.full(len(nnum), settings["initial_t"]), *values])
         time = np.r_[0., np.asarray(times)]
         np.savez_compressed(output / "internal_solution.npz", node_ids=nnum, coordinates_m=xyz,
@@ -219,15 +244,21 @@ def run_internal_case(case_config, screening_config, *, depth_mode=None, materia
     except Exception as exc:
         receipt.update(status="failed", error=str(exc))
         atomic_json(output / "internal_summary.json", receipt)
+        print(f"[internal] Native diagnostics retained: {native}", flush=True)
         raise
     finally:
-        if engine is not None:engine.exit()
+        if engine is not None:
+            try:
+                engine.exit()
+            except Exception:
+                if receipt["status"] != "failed":raise
 
 
 def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=None, output_dir=None,
-                     depth_mode=None, material_axes=None, report_only=False):
+                     depth_mode=None, material_axes=None, report_only=False, processors=None):
     # Required physical choices are checked even for report regeneration.
     options, _, _, settings, _ = screening_settings(screening_config, depth_mode=depth_mode, material_axes=material_axes)
+    native_launch_options(options, processors)  # Validate before starting any case.
     runs = Path(runs_dir).resolve()
     if not runs.is_dir():raise ThermalAnalysisError(f"Runs directory does not exist: {runs}")
     if geometry_dir is not None or (runs.parent / "geometry_batch").is_dir():
@@ -276,7 +307,7 @@ def compare_internal(runs_dir, screening_config, *, geometry_dir=None, cases=Non
                         saved["coordinates_m"], saved["triangle_node_ids"], saved["temperatures_K"][-1], settings["limit_K"])
             else:
                 receipt = run_internal_case(work / "_batch/config.yaml", screening_config,
-                    depth_mode=depth_mode, material_axes=material_axes)
+                    depth_mode=depth_mode, material_axes=material_axes, processors=processors)
             if receipt.get("energy_balance", {}).get("status") != "passed":raise ThermalAnalysisError("Internal energy check is not passed")
             from .reporting import read_csv
             history = read_csv(work / "internal_analysis/internal_worst_temperature_history.csv")

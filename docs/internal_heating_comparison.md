@@ -116,6 +116,59 @@ elements were created. These messages do not establish that convection is
 missing. Do not delete the line loads to silence them: MAPDL's `SFLDELE`
 also deletes their corresponding finite-element loads.
 
+## Native execution and result files
+
+The internal-analysis runner now explicitly launches **shared-memory MAPDL**
+(`-smp`). `mapdl_parallel_mode: smp` is the default even in an existing YAML
+that omits this key. `processors: 4` therefore requests four threads in one
+process. An explicit `mapdl_parallel_mode: dmp` retains the distributed option.
+
+This execution change responds to the reported Windows 2025 R1 `SIG$ABORT`
+after the two-load-step solve reached 200 s: fresh distributed `.rth` parts
+were present, while the combined `.rth` still belonged to an earlier run.
+That demonstrates that the old combined file cannot validate the new run;
+it does not identify the exact internal MAPDL defect or prove an overall
+memory-exhaustion cause. Shared-memory execution avoids the multi-process
+result-merging path and needs verification on the licensed host.
+
+The internal path stores **NSOL at every solved substep**, instead of every
+element result as well. For this thermal-only model NSOL contains nodal
+temperatures. All nodes and physical output times needed by the probe,
+convection/radiation and FE-enthalpy calculations are retained. Those
+calculations already use solved temperatures and the verified mesh/load laws;
+they do not require saved native element heat-flux or reaction records.
+The conduction equations, load laws and energy gate are unchanged. The
+separate older thermal workflow retains its existing native output policy.
+
+Each new attempt has its own directory:
+
+```text
+runs/<case>/internal_analysis/native_runs/<UTC attempt ID>/
+    internal_model.db       # model saved before the first SOLVE
+    internal_nose.rth       # thermal results, when written by MAPDL
+    mapdl_commands.log
+    mapdl_console.out
+```
+
+The path is printed before launch and recorded under `native_runtime` in
+`internal_summary.json`, including on failure. The original native files in
+the parent directory are retained. A fresh attempt cannot accidentally read
+those older combined results. Neither a partial distributed result nor a
+final convergence message bypasses the result-reading and energy checks.
+
+For an initial controlled retry of the failed nose, use one shared-memory
+thread without editing the exposure/material YAML:
+
+```powershell
+.\.venv\Scripts\python.exe study.py update
+.\.venv\Scripts\python.exe -u study.py internal-compare --screening-config .\internal_screening_carbon_carbon.yaml --cases "mk3_body_internals_blunt_nose" --processors 1
+```
+
+`--processors` changes runtime execution only; it does not change the physical
+comparison settings or force already-valid results to be recalculated when
+using `--report-only`. Existing results still need their original verified
+material, calibration, physical settings and source hashes.
+
 ## Run on Windows
 
 The filled example `internal_screening_carbon_carbon.yaml` uses the supplied
@@ -200,7 +253,8 @@ Each `runs/<nose>/internal_analysis/` contains:
 - The surface-temperature, heat-flux, heat-load and solid-energy CSVs also
   written by the existing thermal result writer.
 - `internal_summary.json`: complete/failed status, source hashes, material
-  and orientation, probes, screening result, extrapolation and energy check.
+  and orientation, probes, screening result, extrapolation, energy check and
+  native execution directory/settings.
 
 `runs/comparison/internal_heating/` contains the internal-temperature
 history overlay, peak internal-temperature bar chart and time-to-1800-K bar

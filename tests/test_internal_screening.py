@@ -12,7 +12,7 @@ import numpy as np
 import yaml
 
 from pipeline.internal_screening import (MODEL_VERSION, compare_internal, probe_screening,
-                                         screening_settings, _signature)
+                                         screening_settings, _signature, native_launch_options)
 from pipeline.aerothermal_loading import integrated_powers
 from pipeline.thermal_energy import prepare_solid_energy
 from pipeline.thermal import solve_thermal, transient_schedule
@@ -26,6 +26,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InternalRunnerTests(unittest.TestCase):
+    def test_native_execution_defaults_to_shared_memory_and_accepts_single_thread_override(self):
+        self.assertEqual(native_launch_options({"processors":4}),
+                         ("smp", {"nproc":4, "additional_switches":"-smp"}))
+        self.assertEqual(native_launch_options({"processors":4}, processors=1),
+                         ("smp", {"nproc":1, "additional_switches":"-smp"}))
+        self.assertEqual(native_launch_options({"mapdl_parallel_mode":"dmp", "processors":2}),
+                         ("dmp", {"nproc":2, "additional_switches":"-dis"}))
+        for count in (True, 0, -1, 1.5, float("inf")):
+            with self.subTest(count=count), self.assertRaises(ThermalAnalysisError):
+                native_launch_options({}, processors=count)
+        with self.assertRaises(ThermalAnalysisError):
+            native_launch_options({"mapdl_parallel_mode":"unknown"})
+
     def test_reference_input_requires_both_geometric_and_material_choices(self):
         path = ROOT / "internal_screening.yaml"
         with self.assertRaisesRegex(ThermalAnalysisError, "probe"):
@@ -57,7 +70,8 @@ class InternalRunnerTests(unittest.TestCase):
         _, _, config = settings(duration=200.)
         config["material_axes_2d"] = ["x", "z"]
         load.material_law = from_material_config(yaml.safe_load((ROOT / "materials/reference_carbon_carbon_2d.yaml").read_text()))
-        solve_thermal(engine, load, config, .1)
+        solve_thermal(engine, load, config, .1, save_nodal_temperatures_only=True,
+                      model_database_file="internal_model")
         calls = engine.calls
         self.assertTrue(any(n == "mpdata" and a[:2] == ("KXX", 1) for n, a, _ in calls))
         self.assertTrue(any(n == "mpdata" and a[:2] == ("KYY", 1) and a[3] == 3.89 for n, a, _ in calls))
@@ -65,6 +79,10 @@ class InternalRunnerTests(unittest.TestCase):
         self.assertTrue(any(n == "sfl" and a[1] == "CONV" for n, a, _ in calls))
         self.assertEqual([a for n, a, _ in calls if n == "d"], [(7, "TEMP", 3.)])
         self.assertEqual(load.solid_triangles.shape, (1, 6))
+        self.assertEqual([a for n,a,k in calls if n == "outres"],[("ALL","NONE"),("NSOL","ALL")])
+        save_index = next(i for i,(n,a,k) in enumerate(calls) if n == "save")
+        self.assertEqual(calls[save_index][1],("internal_model","db"))
+        self.assertLess(save_index, next(i for i,(n,a,k) in enumerate(calls) if n == "solve"))
 
     def test_startup_refinement_continues_one_state_and_reads_both_native_load_steps(self):
         load = load_fixture([[0., 0.], [1., 0.], [0., 1.]])
@@ -167,7 +185,9 @@ class InternalRunnerTests(unittest.TestCase):
                 boundary_csv_sha256=file_sha256(boundary), source_sha256={"fixture":"source"},
                 source_geometry_sha256="fixture", comparison_signature={"fixture":"common assumptions"})
             cfg = {"project":{"work_dir":str(case)}, "reporting":{"nose_direction":[1.,0.]}}
-            def fixture_solve(engine, load, settings, mesh_size):
+            def fixture_solve(engine, load, settings, mesh_size, *, save_nodal_temperatures_only, model_database_file):
+                self.assertTrue(save_nodal_temperatures_only)
+                self.assertEqual(model_database_file,"internal_model")
                 numbers, xyz = quadratic_boundary(load)
                 load.solid_triangles = numbers[None, :]
                 load.solid_energy_quadrature = prepare_solid_energy(numbers, xyz, load.solid_triangles)
@@ -188,14 +208,27 @@ class InternalRunnerTests(unittest.TestCase):
                 return numbers, xyz, values, [.1,.2], 1
             native = ModuleType("ansys.mapdl.core"); native.launch_mapdl = Mock(return_value=Mock())
             inputs = (cfg, opts, law, material_path, boundary, snapshot)
+            output = case / "internal_analysis"; output.mkdir()
+            stale_result = output / "internal_nose.rth"; stale_result.write_bytes(b"old combined result")
+            stale_model = output / "internal_nose.db"; stale_model.write_bytes(b"old model")
             with patch.dict(sys.modules, {"ansys.mapdl.core":native}), \
                  patch("pipeline.internal_screening._case_inputs", return_value=inputs), \
                  patch("pipeline.internal_screening.read_load", side_effect=lambda _:load_fixture([[0.,-.1],[.1,0.],[0.,.1]])), \
                  patch("pipeline.internal_screening.solve_thermal", side_effect=fixture_solve):
-                first = compare_internal(root / "runs", config_path)
+                first = compare_internal(root / "runs", config_path, processors=1)
             self.assertEqual(first["status"], "complete")
             native.launch_mapdl.assert_called_once()
+            launched = native.launch_mapdl.call_args.kwargs
+            self.assertEqual(launched["nproc"],1)
+            self.assertEqual(launched["additional_switches"],"-smp")
+            run_directory = Path(launched["run_location"])
+            self.assertEqual(run_directory.parent,output / "native_runs")
+            self.assertTrue(run_directory.is_dir())
+            self.assertEqual(stale_result.read_bytes(),b"old combined result")
+            self.assertEqual(stale_model.read_bytes(),b"old model")
             receipt = json.loads((case / "internal_analysis/internal_summary.json").read_text())
+            self.assertEqual(receipt["native_runtime"]["processors"],1)
+            self.assertEqual(receipt["native_runtime"]["native_directory"],str(run_directory))
             self.assertEqual(receipt["energy_balance"]["status"], "passed")
             self.assertEqual(receipt["screening"]["status"], "not_reached_within_duration")
             self.assertAlmostEqual(receipt["probe_definitions"][0]["x_m"], .09)
@@ -207,6 +240,22 @@ class InternalRunnerTests(unittest.TestCase):
             for name in ("internal_temperature_history_comparison.png", "peak_internal_temperature_comparison.png",
                          "time_to_internal_limit_comparison.png"):
                 self.assertGreater((root / "runs/comparison/internal_heating" / name).stat().st_size, 1000)
+
+            # A server abort and a failed cleanup must retain the original cause,
+            # use a new native folder, and never promote stale saved outputs.
+            native.launch_mapdl.return_value.exit.side_effect = RuntimeError("connection refused during cleanup")
+            with patch.dict(sys.modules, {"ansys.mapdl.core":native}), \
+                 patch("pipeline.internal_screening._case_inputs", return_value=inputs), \
+                 patch("pipeline.internal_screening.read_load", side_effect=lambda _:load_fixture([[0.,-.1],[.1,0.],[0.,.1]])), \
+                 patch("pipeline.internal_screening.solve_thermal", side_effect=RuntimeError("SIG$ABORT")):
+                aborted = compare_internal(root / "runs",config_path,processors=1)
+            self.assertEqual(aborted["case_count"],0)
+            self.assertEqual(aborted["excluded"][0]["reason"],"SIG$ABORT")
+            failed = json.loads((output / "internal_summary.json").read_text())
+            self.assertEqual(failed["status"],"failed")
+            self.assertEqual(failed["error"],"SIG$ABORT")
+            self.assertNotEqual(failed["native_runtime"]["native_directory"],str(run_directory))
+            self.assertEqual(stale_result.read_bytes(),b"old combined result")
 
 
 if __name__ == "__main__":unittest.main()

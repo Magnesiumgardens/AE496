@@ -31,6 +31,8 @@ startup_duration_s: 5.0
 startup_max_time_step_s: 0.05
 mesh_size_m: 0.0005
 mapdl_version: 251
+# Shared-memory threads in one MAPDL process, avoiding MPI result merging.
+mapdl_parallel_mode: smp
 processors: 4
 mapdl_start_timeout_s: 120
 # H, driving temperature, emissivity and radiation ambient come from each
